@@ -18,7 +18,7 @@
 
 ## 三、代码层改名（工作量主要在这）
 
-- [x] `Cargo.toml` workspace：crate 名改为 `fadb-desktop`（或 `fadb-gui`），**目录名一并改** ✅ workspace 8 个成员（fadb-desktop + 7 个 fadb-* 库）及目录均已就位
+- [x] `Cargo.toml` workspace：crate 名改为 `fadb-desktop`（或 `fadb-gui`），**目录名一并改** ✅ 7 个库 crate 均为 fadb-*；桌面包名后于 2026-09-06 进一步改为 `fadb`（`cargo install fadb` 认包名），目录 `apps/fadb-desktop` 保留
 - [x] `cargo fmt / clippy / test / build` 四条命令全跑一遍，确认 workspace 改名后无残留引用 ✅ CI（ci.yml）持续覆盖；`git grep -i bridgescope` 仅命中 CHANGELOG 的历史更名记录，属有意保留
 - [x] 全局搜索替换（注意区分大小写）：
   - 大驼峰显示名 → `Fadb`（UI 显示名、窗口标题）✅ app.rs 窗口标题、头部标识均为 Fadb
@@ -32,13 +32,16 @@
 - [x] 标题换成 `fadb`，副标题上 slogan：**a featherweight ADB toolbox, in Rust** ✅ social-preview.png + README 双语
 - [x] 顶部加 badges：crates.io version、license、CI status、downloads ✅ 已有 version / rust / GUI / platform / CI / license 六枚；crates.io 版徽章等正式发布后加（现在只有 0.0.0 占位，挂着不好看）
 - [x] **补一张好看的截图或 GIF 放最顶上**——GUI 工具没有 demo 图，star 转化率差一个数量级 ✅ social-preview.png
-- [ ] 安装方式加上 `cargo install fadb`（等正式发布后）——过渡期可先加 `cargo install --git https://github.com/yeqing17/fadb fadb-desktop`，无需发布即可用
+- [x] 安装方式加上 `cargo install fadb`（等正式发布后）✅ README 中英双版已加，`fadb` 0.8.11 已在 crates.io
 - [x] 清理 README 里所有旧项目名的历史描述 ✅
 
 ## 五、发布与推广（改完名才是开始）
 
 - [x] 打一个 **v0.8.0**（改名本身就值得一个 minor version），release note 里写明已完成更名 ✅ CHANGELOG 已有更名条目，现版本 0.8.11
-- [ ] `cargo publish` 正式版（注意：本机 cargo 配了 rsproxy 镜像，发布必须带 `--registry crates-io`，镜像不能发布）。**路线二步骤**：① `apps/fadb-desktop/Cargo.toml` 包名 `fadb-desktop` → `fadb`（`cargo install fadb` 认包名）；② 6 个 path 依赖补 `version.workspace = true`；③ 工具链 1.90 支持 `cargo publish --workspace`，一条命令按依赖顺序发全部 8 个包
+- [x] `cargo publish` 正式版 ✅ 2026-09-06 全部 8 个包发布 0.8.11。发布经验（下次发版照做）：
+  - 本机 rsproxy 镜像会**劫持依赖解析**（报 "no matching package found"），发布要用无 config 的临时 CARGO_HOME（把 `F:\DevCache\cargo\credentials.toml` 拷进去）：`CARGO_HOME=<临时目录> cargo publish -p <crate> --registry crates-io`
+  - crates.io 对**新 crate 限流约 1 个/10 分钟**（429），首次发多个新包要按窗口逐个发；老 crate 发新版本不受此限
+  - 依赖版本字面量：各 manifest 里 path 依赖写死 `version = "0.8.11"`（14 处），升版时同步改；0.8.x 内不改也兼容（caret 语义），跨 0.9 必须改
 - [ ] 发帖渠道按效果排序：
   1. **r/rust** 的 "What's everyone working on" 帖或直接发 showcase（GUI 工具带截图在 r/rust 很吃香）
   2. **This Week in Rust** 提交
