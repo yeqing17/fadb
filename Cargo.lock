@@ -948,6 +948,38 @@ dependencies = [
 ]
 
 [[package]]
+name = "fadb"
+version = "0.8.11"
+dependencies = [
+ "arboard",
+ "eframe",
+ "egui_plot",
+ "fadb-adb",
+ "fadb-ai",
+ "fadb-device",
+ "fadb-domain",
+ "fadb-scrcpy",
+ "fadb-test-support",
+ "futures-util",
+ "image",
+ "raw-window-handle",
+ "reqwest",
+ "rfd",
+ "semver",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+ "vt100",
+ "windows-sys 0.59.0",
+ "winresource",
+]
+
+[[package]]
 name = "fadb-adb"
 version = "0.8.11"
 dependencies = [
@@ -980,38 +1012,6 @@ name = "fadb-application"
 version = "0.8.11"
 dependencies = [
  "fadb-domain",
-]
-
-[[package]]
-name = "fadb-desktop"
-version = "0.8.11"
-dependencies = [
- "arboard",
- "eframe",
- "egui_plot",
- "fadb-adb",
- "fadb-ai",
- "fadb-device",
- "fadb-domain",
- "fadb-scrcpy",
- "fadb-test-support",
- "futures-util",
- "image",
- "raw-window-handle",
- "reqwest",
- "rfd",
- "semver",
- "serde",
- "serde_json",
- "sha2",
- "tokio",
- "tokio-util",
- "tracing",
- "tracing-subscriber",
- "uuid",
- "vt100",
- "windows-sys 0.59.0",
- "winresource",
 ]
 
 [[package]]

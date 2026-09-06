@@ -1,13 +1,15 @@
 [package]
 name = "fadb-adb"
+description = "Pure-Rust ADB client used by fadb: transports, binary-safe shell streams, file transfer, logcat, screenshots, and process inspection."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
+repository.workspace = true
 
 [dependencies]
 async-trait.workspace = true
-fadb-domain = { path = "../fadb-domain" }
+fadb-domain = { path = "../fadb-domain", version = "0.8.11" }
 flate2.workspace = true
 image.workspace = true
 quick-xml.workspace = true

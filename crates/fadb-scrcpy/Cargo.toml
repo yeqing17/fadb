@@ -1,12 +1,14 @@
 [package]
 name = "fadb-scrcpy"
+description = "scrcpy video mirroring for fadb: session planning, wire-protocol demuxing, and H.264 decoding."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
+repository.workspace = true
 
 [dependencies]
-fadb-domain = { path = "../fadb-domain" }
+fadb-domain = { path = "../fadb-domain", version = "0.8.11" }
 mp4.workspace = true
 openh264.workspace = true
 tokio.workspace = true

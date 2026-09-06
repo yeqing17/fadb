@@ -1,12 +1,14 @@
 [package]
 name = "fadb-application"
+description = "Android application management over ADB for fadb: listing, launching, installing, freezing, and force-stopping packages."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
+repository.workspace = true
 
 [dependencies]
-fadb-domain = { path = "../fadb-domain" }
+fadb-domain = { path = "../fadb-domain", version = "0.8.11" }
 
 [lints]
 workspace = true

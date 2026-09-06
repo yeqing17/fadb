@@ -1,14 +1,16 @@
 [package]
 name = "fadb-test-support"
+description = "In-memory fakes and harness helpers shared by the fadb test suites."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
+repository.workspace = true
 
 [dependencies]
 async-trait.workspace = true
-fadb-adb = { path = "../fadb-adb" }
-fadb-domain = { path = "../fadb-domain" }
+fadb-adb = { path = "../fadb-adb", version = "0.8.11" }
+fadb-domain = { path = "../fadb-domain", version = "0.8.11" }
 image.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true

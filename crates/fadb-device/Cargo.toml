@@ -1,13 +1,15 @@
 [package]
 name = "fadb-device"
+description = "Device discovery and connection management for fadb: USB and wireless devices, pairing, mDNS discovery, and state tracking."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
+repository.workspace = true
 
 [dependencies]
-fadb-adb = { path = "../fadb-adb" }
-fadb-domain = { path = "../fadb-domain" }
+fadb-adb = { path = "../fadb-adb", version = "0.8.11" }
+fadb-domain = { path = "../fadb-domain", version = "0.8.11" }
 
 [lints]
 workspace = true

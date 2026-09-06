@@ -2,6 +2,7 @@
   <img src="docs/social-preview.png" width="640" alt="fadb — a featherweight ADB toolbox, in Rust"/>
   <p>
     <a href="CHANGELOG.md"><img alt="Version" src="https://img.shields.io/github/v/tag/yeqing17/fadb?label=version&sort=semver&color=3DDC84"></a>
+    <a href="https://crates.io/crates/fadb"><img alt="crates.io" src="https://img.shields.io/crates/v/fadb?color=3DDC84"></a>
     <a href="rust-toolchain.toml"><img alt="Rust" src="https://img.shields.io/badge/rust-1.90-DEA584?logo=rust&logoColor=white"></a>
     <a href="https://github.com/emilk/egui"><img alt="GUI" src="https://img.shields.io/badge/GUI-egui%20%2F%20eframe-FEBD2F"></a>
     <img alt="Platform" src="https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-4A90D9">
@@ -52,6 +53,16 @@
 
 ## 🚀 Getting started
 
+**Install (requires Rust 1.90+; the first install compiles for a few minutes):**
+
+```bash
+cargo install fadb
+```
+
+Prefer no Rust toolchain? Grab the prebuilt Windows build from [Releases](https://github.com/yeqing17/fadb/releases) (in-app one-click upgrades included).
+
+**Building from source** requires:
+
 | Dependency | Notes |
 | --- | --- |
 | Rust 1.90 | pinned by [`rust-toolchain.toml`](rust-toolchain.toml), with rustfmt and clippy included |
@@ -59,21 +70,21 @@
 | Desktop build prerequisites | the usual `eframe` build dependencies on Windows / macOS / Linux |
 
 ```bash
-cargo run -p fadb-desktop
+cargo run -p fadb
 ```
 
 Try the UI without a device using the fake backend (pick the variant for your shell):
 
 ```bash
 # macOS / Linux / Git Bash
-FADB_FAKE=1 cargo run -p fadb-desktop
+FADB_FAKE=1 cargo run -p fadb
 
 # Windows PowerShell
-$env:FADB_FAKE = "1"; cargo run -p fadb-desktop
+$env:FADB_FAKE = "1"; cargo run -p fadb
 
 # Windows cmd
 set FADB_FAKE=1
-cargo run -p fadb-desktop
+cargo run -p fadb
 ```
 
 ## 🧪 Quality checks

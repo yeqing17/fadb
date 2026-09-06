@@ -2,6 +2,7 @@
   <img src="docs/social-preview.png" width="640" alt="fadb — a featherweight ADB toolbox, in Rust"/>
   <p>
     <a href="CHANGELOG.md"><img alt="Version" src="https://img.shields.io/github/v/tag/yeqing17/fadb?label=version&sort=semver&color=3DDC84"></a>
+    <a href="https://crates.io/crates/fadb"><img alt="crates.io" src="https://img.shields.io/crates/v/fadb?color=3DDC84"></a>
     <a href="rust-toolchain.toml"><img alt="Rust" src="https://img.shields.io/badge/rust-1.90-DEA584?logo=rust&logoColor=white"></a>
     <a href="https://github.com/emilk/egui"><img alt="GUI" src="https://img.shields.io/badge/GUI-egui%20%2F%20eframe-FEBD2F"></a>
     <img alt="Platform" src="https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-4A90D9">
@@ -52,6 +53,16 @@
 
 ## 🚀 快速开始
 
+**安装(需要 Rust 1.90+,首装会现场编译几分钟):**
+
+```bash
+cargo install fadb
+```
+
+不装 Rust 的话,到 [Releases](https://github.com/yeqing17/fadb/releases) 下载 Windows 预编译版(支持应用内一键升级)。
+
+**从源码构建**需要:
+
 | 依赖 | 说明 |
 | --- | --- |
 | Rust 1.90 | 版本由 [`rust-toolchain.toml`](rust-toolchain.toml) 固定,rustfmt 与 clippy 一并就位 |
@@ -59,21 +70,21 @@
 | 桌面构建依赖 | `eframe` 在 Windows / macOS / Linux 上的常规构建依赖 |
 
 ```bash
-cargo run -p fadb-desktop
+cargo run -p fadb
 ```
 
 不接设备、使用假后端体验界面(按所用终端任选一种):
 
 ```bash
 # macOS / Linux / Git Bash
-FADB_FAKE=1 cargo run -p fadb-desktop
+FADB_FAKE=1 cargo run -p fadb
 
 # Windows PowerShell
-$env:FADB_FAKE = "1"; cargo run -p fadb-desktop
+$env:FADB_FAKE = "1"; cargo run -p fadb
 
 # Windows cmd
 set FADB_FAKE=1
-cargo run -p fadb-desktop
+cargo run -p fadb
 ```
 
 ## 🧪 质量检查

@@ -33,13 +33,13 @@ jobs:
           fi
 
           version="${tag#v}"
-          package_version="$(cargo metadata --no-deps --locked --format-version 1 | python3 -c 'import json,sys; data=json.load(sys.stdin); print(next(package["version"] for package in data["packages"] if package["name"] == "fadb-desktop"))')"
+          package_version="$(cargo metadata --no-deps --locked --format-version 1 | python3 -c 'import json,sys; data=json.load(sys.stdin); print(next(package["version"] for package in data["packages"] if package["name"] == "fadb"))')"
           if [[ "$version" != "$package_version" ]]; then
-            echo "Tag version $version does not match fadb-desktop $package_version" >&2
+            echo "Tag version $version does not match fadb $package_version" >&2
             exit 1
           fi
 
-          repository="$(cargo metadata --no-deps --locked --format-version 1 | python3 -c 'import json,sys; data=json.load(sys.stdin); print(next(package["repository"] for package in data["packages"] if package["name"] == "fadb-desktop"))')"
+          repository="$(cargo metadata --no-deps --locked --format-version 1 | python3 -c 'import json,sys; data=json.load(sys.stdin); print(next(package["repository"] for package in data["packages"] if package["name"] == "fadb"))')"
           if [[ "$repository" != "https://github.com/yeqing17/fadb" ]]; then
             echo "Unexpected Cargo repository: $repository" >&2
             exit 1
@@ -65,20 +65,20 @@ jobs:
         with:
           targets: x86_64-pc-windows-msvc
       - run: cargo test --workspace --locked
-      - run: cargo build --package fadb-desktop --release --locked --target x86_64-pc-windows-msvc
+      - run: cargo build --package fadb --release --locked --target x86_64-pc-windows-msvc
       - name: Package Windows release
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
           $tag = "${{ github.ref_name }}"
-          $bundleName = "fadb-desktop-$tag-x86_64-pc-windows-msvc"
-          $binary = "target/x86_64-pc-windows-msvc/release/fadb-desktop.exe"
+          $bundleName = "fadb-$tag-x86_64-pc-windows-msvc"
+          $binary = "target/x86_64-pc-windows-msvc/release/fadb.exe"
           if (-not (Test-Path $binary -PathType Leaf) -or (Get-Item $binary).Length -eq 0) {
             throw "Release executable is missing or empty: $binary"
           }
 
           New-Item -ItemType Directory -Force -Path "dist/$bundleName" | Out-Null
-          Copy-Item $binary "dist/$bundleName/fadb-desktop.exe"
+          Copy-Item $binary "dist/$bundleName/fadb.exe"
           Copy-Item README.md, LICENSE-MIT, LICENSE-APACHE, NOTICE "dist/$bundleName/"
           Compress-Archive -Path "dist/$bundleName" -DestinationPath "dist/$bundleName.zip"
           # Bare executable next to the bundle: this is the asset the in-app
@@ -89,7 +89,7 @@ jobs:
           $archive = [System.IO.Compression.ZipFile]::OpenRead("dist/$bundleName.zip")
           try {
             $expected = @(
-              "$bundleName/fadb-desktop.exe",
+              "$bundleName/fadb.exe",
               "$bundleName/README.md",
               "$bundleName/LICENSE-MIT",
               "$bundleName/LICENSE-APACHE",
@@ -141,7 +141,7 @@ jobs:
             echo "Expected exactly one Windows release executable" >&2
             exit 1
           fi
-          checksum="fadb-desktop-${GITHUB_REF_NAME}-SHA256SUMS.txt"
+          checksum="fadb-${GITHUB_REF_NAME}-SHA256SUMS.txt"
           (
             cd dist
             sha256sum "${archives[0]}" "${executables[0]}" > "$checksum"

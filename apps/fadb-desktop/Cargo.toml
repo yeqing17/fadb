@@ -1,5 +1,6 @@
 [package]
-name = "fadb-desktop"
+name = "fadb"
+description = "A featherweight ADB toolbox: a pure-Rust, cross-platform desktop GUI for inspecting and managing Android devices."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -8,12 +9,12 @@ repository.workspace = true
 
 [dependencies]
 arboard.workspace = true
-fadb-adb = { path = "../../crates/fadb-adb" }
-fadb-ai = { path = "../../crates/fadb-ai" }
-fadb-device = { path = "../../crates/fadb-device" }
-fadb-domain = { path = "../../crates/fadb-domain" }
-fadb-scrcpy = { path = "../../crates/fadb-scrcpy" }
-fadb-test-support = { path = "../../crates/fadb-test-support" }
+fadb-adb = { path = "../../crates/fadb-adb", version = "0.8.11" }
+fadb-ai = { path = "../../crates/fadb-ai", version = "0.8.11" }
+fadb-device = { path = "../../crates/fadb-device", version = "0.8.11" }
+fadb-domain = { path = "../../crates/fadb-domain", version = "0.8.11" }
+fadb-scrcpy = { path = "../../crates/fadb-scrcpy", version = "0.8.11" }
+fadb-test-support = { path = "../../crates/fadb-test-support", version = "0.8.11" }
 eframe.workspace = true
 futures-util.workspace = true
 image.workspace = true
