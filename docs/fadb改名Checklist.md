@@ -7,7 +7,7 @@
 
 - [ ] 注册域名 **fadb.dev**（可选 + fadb.rs）
 - [x] 在 crates.io 上占位：`cargo new fadb && cargo publish`（发布一个 0.0.0-placeholder 版本，描述写清楚，避免被抢注——**这步很关键，crate 名先到先得**）✅ 2026-09-06 已发布 [fadb 0.0.0](https://crates.io/crates/fadb)，名字已锁定
-- [ ] npm 占位（可选）：`npm publish` 一个空 `fadb` 包
+- [ ] npm 占位（可选）：`npm publish` 一个空 `fadb` 包（名字未被占用;本机 npm 未登录,需先 `npm adduser`）
 - [ ] GitHub 上注册组织 `fadb-dev` 之类备用（`fadb` 用户名已被占，确认下它是不是僵尸号，是的话可以试着向 GitHub 申诉释放，但别抱希望）
 
 ## 二、GitHub 仓库改名
@@ -37,11 +37,11 @@
 
 ## 五、发布与推广（改完名才是开始）
 
-- [x] 打一个 **v0.8.0**（改名本身就值得一个 minor version），release note 里写明已完成更名 ✅ CHANGELOG 已有更名条目，现版本 0.8.11
+- [x] 打一个 **v0.8.0**（改名本身就值得一个 minor version），release note 里写明已完成更名 ✅ v0.8.12 起双平台同步:GitHub Release 产物为 `fadb-` 前缀新命名,crates.io 同版本发布
 - [x] `cargo publish` 正式版 ✅ 2026-09-06 全部 8 个包发布 0.8.11。发布经验（下次发版照做）：
   - 本机 rsproxy 镜像会**劫持依赖解析**（报 "no matching package found"），发布要用无 config 的临时 CARGO_HOME（把 `F:\DevCache\cargo\credentials.toml` 拷进去）：`CARGO_HOME=<临时目录> cargo publish -p <crate> --registry crates-io`
   - crates.io 对**新 crate 限流约 1 个/10 分钟**（429），首次发多个新包要按窗口逐个发；老 crate 发新版本不受此限
-  - 依赖版本字面量：各 manifest 里 path 依赖写死 `version = "0.8.11"`（14 处），升版时同步改；0.8.x 内不改也兼容（caret 语义），跨 0.9 必须改
+  - 依赖版本字面量：各 manifest 里 path 依赖写死 `version = "0.8.12"`（14 处），升版时同步改；0.8.x 内不改也兼容（caret 语义），跨 0.9 必须改
 - [ ] 发帖渠道按效果排序：
   1. **r/rust** 的 "What's everyone working on" 帖或直接发 showcase（GUI 工具带截图在 r/rust 很吃香）
   2. **This Week in Rust** 提交
