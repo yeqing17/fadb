@@ -8,7 +8,7 @@ rust-version.workspace = true
 repository.workspace = true
 
 [dependencies]
-fadb-domain = { path = "../fadb-domain", version = "0.8.11" }
+fadb-domain = { path = "../fadb-domain", version = "0.8.12" }
 mp4.workspace = true
 openh264.workspace = true
 tokio.workspace = true

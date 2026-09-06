@@ -9,8 +9,8 @@ repository.workspace = true
 
 [dependencies]
 async-trait.workspace = true
-fadb-adb = { path = "../fadb-adb", version = "0.8.11" }
-fadb-domain = { path = "../fadb-domain", version = "0.8.11" }
+fadb-adb = { path = "../fadb-adb", version = "0.8.12" }
+fadb-domain = { path = "../fadb-domain", version = "0.8.12" }
 image.workspace = true
 tokio.workspace = true
 tokio-util.workspace = true

@@ -2,6 +2,17 @@
 
 本文件记录 fadb 桌面应用每个版本的可见变化,格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/),版本号遵循语义化版本。每个版本对应仓库里的 `v*` 标签;更早的零散发布(BridgeScope 时期 0.4.x—0.6.x)不再逐条回填,可在 [Releases 页面](https://github.com/yeqing17/fadb/releases)按标签查看。
 
+## [0.8.12] - 2026-09-06
+
+### 新增
+
+- 上架 crates.io:应用包名由 `fadb-desktop` 改为 `fadb`,现在可以 `cargo install fadb` 一条命令安装;7 个内部库以 `fadb-domain`、`fadb-adb` 等名称同步发布。README 新增 crates.io 徽章与安装说明。
+- 发布产物随包名更名:`fadb-<tag>-x86_64-pc-windows-msvc.exe` / `.zip` 与 `fadb-<tag>-SHA256SUMS.txt`(原 `fadb-desktop-` 前缀)。应用内更新按文件后缀匹配发布资产,不受更名影响;老版本检测不到新命名时,仍会降级为「查看发布页」跳转。
+
+### 修复
+
+- 设置窗口「主题」「诊断信息」「发现新版本」等行不再套 horizontal 容器,直接写入网格单元格,修正按钮与文本相对左列下沉、不对齐的问题。
+
 ## [0.8.11] - 2026-09-06
 
 无功能变化。本版本用于实测 0.8.10 新增的应用内自动更新:在 0.8.10 里点「检查更新」即可检测到本版本,完整走一遍下载、SHA-256 校验与重启换版本链路。
