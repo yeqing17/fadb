@@ -936,6 +936,26 @@ impl fmt::Debug for AiSettings {
     }
 }
 
+/// A published release newer than (or equal to) the running build, as
+/// advertised by the GitHub Releases API.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UpdateInfo {
+    /// Release version without the leading `v` (for example `0.8.9`).
+    pub version: String,
+    /// Browser URL of the release page.
+    pub url: String,
+}
+
+/// Outcome of comparing the running version against the latest release.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum UpdateCheckOutcome {
+    /// The running build is at least as new as the latest release, or the
+    /// advertised version could not be parsed (stay quiet rather than nag).
+    UpToDate,
+    /// A strictly newer release is available.
+    Available(UpdateInfo),
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum BackendCommand {
     RefreshDevices,
@@ -1101,6 +1121,9 @@ pub enum BackendCommand {
         target: DeviceTarget,
         keycode: u32,
     },
+    /// Query GitHub for the latest published release (update check). The
+    /// runtime answers [`BackendEvent::UpdateChecked`] exactly once.
+    CheckForUpdates,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -1395,6 +1418,9 @@ pub enum BackendEvent {
         target: DeviceTarget,
         error: BridgeError,
     },
+    /// Result of an update check: the comparison outcome, or a
+    /// [`BridgeError`] describing why the GitHub Releases API was unreachable.
+    UpdateChecked(Result<UpdateCheckOutcome, BridgeError>),
 }
 
 #[cfg(test)]

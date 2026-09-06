@@ -30,6 +30,7 @@ quick-xml = "0.38.3"
 sha2 = "0.10.9"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.145"
+semver = "1.0.28"
 thiserror = "2.0.17"
 tokio = { version = "1.53.1", features = ["fs", "io-util", "macros", "process", "rt-multi-thread", "sync", "time"] }
 tokio-util = { version = "0.7.18", features = ["rt"] }
@@ -37,7 +38,9 @@ tracing = "0.1.44"
 vt100 = "0.16.2"
 tracing-subscriber = { version = "0.3.22", features = ["env-filter", "fmt"] }
 uuid = { version = "1.24.0", features = ["v4", "serde"] }
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "http2"] }
+# "system-proxy" reads the OS proxy settings (Windows registry / macOS
+# configuration); without it reqwest only honors proxy environment vars.
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "http2", "system-proxy"] }
 egui_plot = "0.34.1"
 
 [workspace.lints.rust]

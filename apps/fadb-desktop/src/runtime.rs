@@ -16,7 +16,7 @@ use fadb_domain::{
     LogcatSessionId, OperationId, OverwritePolicy, PackageName, PerformanceSnapshot,
     ProcessSnapshot, RawScreenshotPng, RemoteFileMutationKind, RemoteFileMutationSummary,
     RemotePath, ScreenshotData, ScreenshotFormat, ScreenshotImage, ShellSessionId, ShellSize,
-    WebViewPage,
+    UpdateCheckOutcome, UpdateInfo, WebViewPage,
 };
 use fadb_scrcpy::decoder::{RgbaFrame, VideoDecoder};
 use fadb_scrcpy::{
@@ -38,6 +38,9 @@ const DEVTOOLS_HTTP_TIMEOUT: Duration = Duration::from_secs(4);
 /// Total budget for the scrcpy server to come up and announce its video
 /// stream through the forward tunnel.
 const MIRROR_SERVER_TIMEOUT: Duration = Duration::from_secs(15);
+/// Budget for one update check against the GitHub Releases API.
+const UPDATE_HTTP_TIMEOUT: Duration = Duration::from_secs(10);
+const RELEASES_API_URL: &str = "https://api.github.com/repos/yeqing17/fadb/releases/latest";
 /// One local connect attempt against adb's forward listener.
 const MIRROR_CONNECT_ATTEMPT: Duration = Duration::from_secs(1);
 /// Pause between connect attempts while the server is still booting.
@@ -302,6 +305,10 @@ async fn run_backend(
                             &context,
                         )
                         .await;
+                    }
+                    BackendCommand::CheckForUpdates => {
+                        let outcome = check_for_update().await;
+                        send_event(&events, &context, BackendEvent::UpdateChecked(outcome)).await;
                     }
                     BackendCommand::DisconnectDevice(endpoint) => {
                         match transport.disconnect_endpoint(&endpoint).await {
@@ -2677,4 +2684,145 @@ async fn perform_application_action(
 fn fake_backend_enabled() -> bool {
     std::env::var("FADB_FAKE")
         .is_ok_and(|value| matches!(value.to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
+}
+
+/// Query the GitHub Releases API for the latest published release and compare
+/// it against the running build.
+///
+/// reqwest honors the standard proxy environment variables, so a user behind
+/// a system proxy reaches GitHub the same way their shell does; anything that
+/// goes wrong (offline, blocked, rate limited) degrades to a [`BridgeError`]
+/// the UI can show inline. `/releases/latest` already skips drafts and
+/// prereleases.
+async fn check_for_update() -> Result<UpdateCheckOutcome, BridgeError> {
+    #[derive(serde::Deserialize)]
+    struct LatestRelease {
+        #[serde(default)]
+        tag_name: String,
+        #[serde(default)]
+        html_url: String,
+    }
+
+    let client = reqwest::Client::builder()
+        .timeout(UPDATE_HTTP_TIMEOUT)
+        .build()
+        .map_err(|error| {
+            BridgeError::new(
+                ErrorCode::Internal,
+                "update.check_failed",
+                error.to_string(),
+            )
+        })?;
+    // The GitHub API answers 403 to requests without a User-Agent.
+    let response = client
+        .get(RELEASES_API_URL)
+        .header(
+            reqwest::header::USER_AGENT,
+            concat!("fadb/", env!("CARGO_PKG_VERSION")),
+        )
+        .send()
+        .await
+        .and_then(reqwest::Response::error_for_status)
+        .map_err(|error| {
+            BridgeError::new(
+                ErrorCode::Internal,
+                "update.check_failed",
+                error.to_string(),
+            )
+        })?;
+    let release: LatestRelease = response.json::<LatestRelease>().await.map_err(|error| {
+        BridgeError::new(
+            ErrorCode::Internal,
+            "update.check_failed",
+            error.to_string(),
+        )
+    })?;
+    Ok(evaluate_update(
+        &release.tag_name,
+        &release.html_url,
+        env!("CARGO_PKG_VERSION"),
+    ))
+}
+
+/// Compare a release tag against the running version. Unparseable tags (and
+/// empty responses) resolve to [`UpdateCheckOutcome::UpToDate`]: a malformed
+/// advertisement should stay quiet rather than nag.
+fn evaluate_update(tag_name: &str, url: &str, current: &str) -> UpdateCheckOutcome {
+    let parse = |text: &str| {
+        text.trim()
+            .trim_start_matches(['v', 'V'])
+            .parse::<semver::Version>()
+            .ok()
+    };
+    let (Some(latest), Some(running)) = (parse(tag_name), parse(current)) else {
+        return UpdateCheckOutcome::UpToDate;
+    };
+    if latest > running {
+        UpdateCheckOutcome::Available(UpdateInfo {
+            version: latest.to_string(),
+            url: url.to_owned(),
+        })
+    } else {
+        UpdateCheckOutcome::UpToDate
+    }
+}
+
+#[cfg(test)]
+mod update_check_tests {
+    use super::evaluate_update;
+    use fadb_domain::{UpdateCheckOutcome, UpdateInfo};
+
+    fn available(version: &str) -> UpdateCheckOutcome {
+        UpdateCheckOutcome::Available(UpdateInfo {
+            version: version.to_owned(),
+            url: "https://github.com/yeqing17/fadb/releases/tag/v0.9.0".to_owned(),
+        })
+    }
+
+    #[test]
+    fn newer_release_is_available_with_or_without_v_prefix() {
+        assert_eq!(
+            evaluate_update(
+                "v0.9.0",
+                "https://github.com/yeqing17/fadb/releases/tag/v0.9.0",
+                "0.8.8"
+            ),
+            available("0.9.0")
+        );
+        assert_eq!(
+            evaluate_update("0.9.0", "", "0.8.8"),
+            UpdateCheckOutcome::Available(UpdateInfo {
+                version: "0.9.0".to_owned(),
+                url: String::new(),
+            })
+        );
+    }
+
+    #[test]
+    fn equal_or_older_releases_stay_quiet() {
+        assert_eq!(
+            evaluate_update("v0.8.8", "", "0.8.8"),
+            UpdateCheckOutcome::UpToDate
+        );
+        assert_eq!(
+            evaluate_update("v0.8.7", "", "0.8.8"),
+            UpdateCheckOutcome::UpToDate
+        );
+    }
+
+    #[test]
+    fn unparseable_tags_stay_quiet() {
+        assert_eq!(
+            evaluate_update("", "", "0.8.8"),
+            UpdateCheckOutcome::UpToDate
+        );
+        assert_eq!(
+            evaluate_update("not-a-version", "", "0.8.8"),
+            UpdateCheckOutcome::UpToDate
+        );
+        assert_eq!(
+            evaluate_update("0.8", "", "0.8.8"),
+            UpdateCheckOutcome::UpToDate
+        );
+    }
 }

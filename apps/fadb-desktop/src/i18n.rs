@@ -76,6 +76,16 @@ pub fn text(language: Language, key: &str) -> &'static str {
         (Language::Chinese, "dark") => "深色",
         (Language::Chinese, "settings") => "设置",
         (Language::Chinese, "about") => "关于",
+        (Language::Chinese, "settings.check_updates") => "检查更新",
+        (Language::Chinese, "settings.auto_check_updates") => "启动时自动检查更新",
+        (Language::Chinese, "update.checking") => "正在检查更新…",
+        (Language::Chinese, "update.up_to_date") => "已是最新版本",
+        (Language::Chinese, "update.available") => "发现新版本",
+        (Language::Chinese, "update.open_releases") => "查看发布页",
+        (Language::Chinese, "update.check_failed") => "检查更新失败",
+        (Language::Chinese, "update.check_failed_hint") => {
+            "无法连接 GitHub。请确认系统代理可用，或在启动前设置 https_proxy 环境变量，然后重试。"
+        }
         (Language::Chinese, "close") => "关闭",
         (Language::Chinese, "fake") => "模拟设备",
         (Language::Chinese, "connect_android") => "连接 Android 设备",
@@ -515,6 +525,17 @@ pub fn text(language: Language, key: &str) -> &'static str {
         (_, "dark") => "Dark",
         (_, "settings") => "Settings",
         (_, "about") => "About",
+        (_, "settings.check_updates") => "Check for updates",
+        (_, "settings.auto_check_updates") => "Check for updates at startup",
+        (_, "update.checking") => "Checking for updates…",
+        (_, "update.up_to_date") => "Fadb is up to date",
+        (_, "update.available") => "New version available",
+        (_, "update.open_releases") => "Open release page",
+        (_, "update.check_failed") => "Update check failed",
+        (_, "update.check_failed_hint") => {
+            "Could not reach GitHub. Make sure your system proxy is up (or set https_proxy \
+             before launching), then retry."
+        }
         (_, "close") => "Close",
         (_, "fake") => "Fake device",
         (_, "connect_android") => "Connect an Android device",
@@ -929,6 +950,29 @@ mod tests {
     fn window_control_keys_translate_for_both_languages() {
         for language in [Language::English, Language::Chinese] {
             for key in ["win_minimize", "win_maximize", "win_restore", "win_close"] {
+                assert!(
+                    !text(language, key).is_empty(),
+                    "missing {key:?} translation for {language:?}"
+                );
+            }
+        }
+    }
+
+    const UPDATE_KEYS: &[&str] = &[
+        "settings.check_updates",
+        "settings.auto_check_updates",
+        "update.checking",
+        "update.up_to_date",
+        "update.available",
+        "update.open_releases",
+        "update.check_failed",
+        "update.check_failed_hint",
+    ];
+
+    #[test]
+    fn update_keys_translate_for_both_languages() {
+        for language in [Language::English, Language::Chinese] {
+            for key in UPDATE_KEYS {
                 assert!(
                     !text(language, key).is_empty(),
                     "missing {key:?} translation for {language:?}"

@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 use eframe::egui::{self, Color32, RichText, Stroke};
 use fadb_domain::{
     AdbEndpoint, AiSettings, BackendCommand, BackendEvent, BridgeError, DeviceOverview,
-    DeviceRecord, DeviceSnapshot,
+    DeviceRecord, DeviceSnapshot, UpdateCheckOutcome, UpdateInfo,
 };
 
 use crate::{
@@ -37,6 +37,14 @@ const NAVIGATION_WIDTH: f32 = 125.0;
 const COLLAPSED_NAVIGATION_WIDTH: f32 = 40.0;
 /// Storage key remembering whether the navigation rail is collapsed.
 const NAVIGATION_COLLAPSED_STORAGE_KEY: &str = "fadb.navigation_collapsed";
+/// Storage key for update-check preferences (auto flag + last success).
+const UPDATE_CHECK_STORAGE_KEY: &str = "fadb.update_check";
+/// Minimum interval between *automatic* update checks; the settings button
+/// always fires. Keeps clear of GitHub's unauthenticated rate limit.
+const UPDATE_AUTO_CHECK_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
+/// Delay after launch before the automatic update check fires, so startup
+/// work (adb detection, device refresh) goes first.
+const UPDATE_STARTUP_DELAY: Duration = Duration::from_secs(5);
 /// Horizontal inner margin of the top-bar frame.
 const TOP_BAR_MARGIN_X: i8 = 12;
 /// Performance panel poll gate in milliseconds. The backend answers as fast
@@ -118,6 +126,53 @@ struct WindowState {
     settings: bool,
 }
 
+/// Lifecycle of the update check shown in the settings window (and toasted
+/// when a check that ran unnoticed at startup finds something).
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+enum UpdateStatus {
+    /// No check has run yet this launch.
+    #[default]
+    Idle,
+    Checking,
+    UpToDate,
+    Available(UpdateInfo),
+    Failed(String),
+}
+
+/// Update-check UI state plus the persisted preferences.
+#[derive(Debug)]
+struct UpdateState {
+    status: UpdateStatus,
+    /// Whether the automatic startup check is enabled (persisted).
+    auto_check: bool,
+    /// Unix seconds of the last *successful* check (persisted); failures
+    /// never update it so a temporarily offline machine retries next launch.
+    last_check_epoch: Option<i64>,
+    /// The startup gate fires at most once per launch.
+    startup_check_sent: bool,
+}
+
+impl UpdateState {
+    fn load(storage: Option<&dyn eframe::Storage>) -> Self {
+        let prefs = storage
+            .and_then(|storage| storage.get_string(UPDATE_CHECK_STORAGE_KEY))
+            .and_then(|stored| serde_json::from_str::<UpdatePrefs>(&stored).ok());
+        Self {
+            status: UpdateStatus::Idle,
+            auto_check: prefs.as_ref().is_none_or(|prefs| prefs.auto_check),
+            last_check_epoch: prefs.as_ref().and_then(|prefs| prefs.last_check_epoch),
+            startup_check_sent: false,
+        }
+    }
+}
+
+/// The part of [`UpdateState`] that round-trips through local storage.
+#[derive(serde::Deserialize, serde::Serialize)]
+struct UpdatePrefs {
+    auto_check: bool,
+    last_check_epoch: Option<i64>,
+}
+
 // Dev hooks add one more flag to the (already small) set of plain bools.
 #[allow(clippy::struct_excessive_bools)]
 pub struct FadbApp {
@@ -167,6 +222,10 @@ pub struct FadbApp {
     endpoint_port: String,
     connecting_endpoint: Option<AdbEndpoint>,
     last_error: Option<BridgeError>,
+    /// Update-check state surfaced in the settings window's about section.
+    update_state: UpdateState,
+    /// When the app started, gating the automatic update check.
+    launched_at: Instant,
     /// Transient confirmation shown at the bottom of the content area
     /// (e.g. after a click-to-copy in the overview).
     toast: Option<Toast>,
@@ -225,6 +284,8 @@ impl FadbApp {
             endpoint_port: "5555".to_owned(),
             connecting_endpoint: None,
             last_error: None,
+            update_state: UpdateState::load(creation_context.storage),
+            launched_at: Instant::now(),
             toast: None,
             windows: WindowState::default(),
             auto_select_requested: std::env::var_os("FADB_SELECT").is_some(),
@@ -334,6 +395,31 @@ impl FadbApp {
                         format!("{} ({endpoint})", error.detail),
                     ));
                 }
+                BackendEvent::UpdateChecked(result) => match result {
+                    Ok(outcome) => {
+                        // Only a successful round-trip refreshes the throttle
+                        // timestamp; failures retry on the next launch.
+                        self.update_state.last_check_epoch = Some(now_epoch_secs());
+                        self.update_state.status = match outcome {
+                            UpdateCheckOutcome::UpToDate => UpdateStatus::UpToDate,
+                            UpdateCheckOutcome::Available(info) => {
+                                // The settings window may be closed (the
+                                // startup check), so toast as well.
+                                self.toast = Some(Toast {
+                                    text: format!(
+                                        "{} v{}",
+                                        text(self.language, "update.available"),
+                                        info.version
+                                    ),
+                                    born: Instant::now(),
+                                    lifetime: UPDATE_TOAST_LIFETIME,
+                                });
+                                UpdateStatus::Available(info)
+                            }
+                        };
+                    }
+                    Err(error) => self.update_state.status = UpdateStatus::Failed(error.detail),
+                },
                 BackendEvent::DevicesChanged(snapshot) => {
                     if snapshot.selected != self.snapshot.selected {
                         self.overview = None;
@@ -472,6 +558,24 @@ impl FadbApp {
                 | BackendEvent::WebviewPagesLoaded { .. }
                 | BackendEvent::WebviewFailed { .. } => {}
             }
+        }
+    }
+
+    /// Fire the once-per-launch automatic update check: a few seconds after
+    /// startup, only when enabled and the last successful check is stale.
+    fn maybe_auto_check_update(&mut self) {
+        let stale = self.update_state.last_check_epoch.is_none_or(|secs| {
+            now_epoch_secs() - secs
+                >= i64::try_from(UPDATE_AUTO_CHECK_INTERVAL.as_secs()).unwrap_or(i64::MAX)
+        });
+        if self.update_state.auto_check
+            && !self.update_state.startup_check_sent
+            && self.launched_at.elapsed() >= UPDATE_STARTUP_DELAY
+            && stale
+        {
+            self.update_state.startup_check_sent = true;
+            self.update_state.status = UpdateStatus::Checking;
+            self.send(BackendCommand::CheckForUpdates);
         }
     }
 
@@ -629,6 +733,20 @@ impl FadbApp {
                     .show(ui, |ui| {
                         ui.label(concat!("Fadb v", env!("CARGO_PKG_VERSION")));
                         ui.hyperlink_to("GitHub", "https://github.com/yeqing17/fadb");
+                        ui.end_row();
+                        if ui
+                            .button(text(self.language, "settings.check_updates"))
+                            .clicked()
+                        {
+                            self.update_state.status = UpdateStatus::Checking;
+                            self.send(BackendCommand::CheckForUpdates);
+                        }
+                        update_status_label(ui, self.language, &self.update_state.status);
+                        ui.end_row();
+                        ui.checkbox(
+                            &mut self.update_state.auto_check,
+                            text(self.language, "settings.auto_check_updates"),
+                        );
                         ui.end_row();
                     });
             });
@@ -1095,6 +1213,7 @@ impl FadbApp {
                             self.toast = Some(Toast {
                                 text: format!("{} {value}", text(self.language, "copied")),
                                 born: Instant::now(),
+                                lifetime: TOAST_LIFETIME,
                             });
                         }
                         Vec::new()
@@ -1493,6 +1612,7 @@ impl FadbApp {
 impl eframe::App for FadbApp {
     fn update(&mut self, context: &egui::Context, _frame: &mut eframe::Frame) {
         self.process_events();
+        self.maybe_auto_check_update();
         self.handle_apk_drop(context);
         if let Some(command) = self
             .files
@@ -1558,6 +1678,12 @@ impl eframe::App for FadbApp {
             .collect();
         if let Ok(serialized) = serde_json::to_string(&sendable) {
             storage.set_string(QUICK_COMMANDS_STORAGE_KEY, serialized);
+        }
+        if let Ok(serialized) = serde_json::to_string(&UpdatePrefs {
+            auto_check: self.update_state.auto_check,
+            last_check_epoch: self.update_state.last_check_epoch,
+        }) {
+            storage.set_string(UPDATE_CHECK_STORAGE_KEY, serialized);
         }
     }
 }
@@ -1656,14 +1782,64 @@ fn caption_button(
     .on_hover_text(tooltip)
 }
 
+/// Right-hand cell of the check-for-updates row in the settings window:
+/// progress, verdict, a release-page link, or the failure reason.
+fn update_status_label(ui: &mut egui::Ui, language: Language, status: &UpdateStatus) {
+    match status {
+        UpdateStatus::Idle => {}
+        UpdateStatus::Checking => {
+            ui.label(text(language, "update.checking"));
+        }
+        UpdateStatus::UpToDate => {
+            ui.label(text(language, "update.up_to_date"));
+        }
+        UpdateStatus::Available(info) => {
+            ui.horizontal(|ui| {
+                ui.label(format!(
+                    "{} v{}",
+                    text(language, "update.available"),
+                    info.version
+                ));
+                if ui.link(text(language, "update.open_releases")).clicked() {
+                    ui.ctx().open_url(egui::OpenUrl::new_tab(info.url.clone()));
+                }
+            });
+        }
+        UpdateStatus::Failed(detail) => {
+            ui.vertical(|ui| {
+                ui.label(RichText::new(format!(
+                    "{} ({detail})",
+                    text(language, "update.check_failed")
+                )));
+                ui.small(text(language, "update.check_failed_hint"));
+            });
+        }
+    }
+}
+
+/// Current Unix time in seconds, timestamping successful update checks.
+fn now_epoch_secs() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .and_then(|since| i64::try_from(since.as_secs()).ok())
+        .unwrap_or(0)
+}
+
 /// A transient confirmation chip, e.g. "Copied 192.168.1.3".
 struct Toast {
     text: String,
     born: Instant,
+    /// How long the chip stays up. Most confirmations are brief; a startup
+    /// update hint lingers so it is not missed.
+    lifetime: Duration,
 }
 
 /// Full opacity for a second, then a half-second fade, then gone.
 const TOAST_LIFETIME: Duration = Duration::from_millis(1500);
+/// Update hints linger longer: the check may have run before the user ever
+/// opened the settings window.
+const UPDATE_TOAST_LIFETIME: Duration = Duration::from_millis(4000);
 
 /// Draw the active toast (if any) at the bottom-center of the content area
 /// and expire it. An `egui::Area` on the foreground layer so panel content
@@ -1671,13 +1847,13 @@ const TOAST_LIFETIME: Duration = Duration::from_millis(1500);
 fn show_toast(ui: &mut egui::Ui, toast: &mut Option<Toast>) {
     let Some(t) = toast.as_ref() else { return };
     let age = t.born.elapsed();
-    if age >= TOAST_LIFETIME {
+    if age >= t.lifetime {
         *toast = None;
         return;
     }
     // Remaining time scaled to the half-second fade window: 1.0 while more
     // than half a second is left, then linearly down to 0.
-    let alpha = ((TOAST_LIFETIME - age).as_secs_f32() / 0.5).clamp(0.0, 1.0);
+    let alpha = ((t.lifetime - age).as_secs_f32() / 0.5).clamp(0.0, 1.0);
     let palette = theme::palette(ui.visuals().dark_mode);
     egui::Area::new(egui::Id::new("fadb-toast"))
         .anchor(egui::Align2::CENTER_BOTTOM, [0.0, -28.0])
