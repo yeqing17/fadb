@@ -5,14 +5,14 @@
     <a href="https://crates.io/crates/fadb"><img alt="crates.io" src="https://img.shields.io/crates/v/fadb?color=3DDC84"></a>
     <a href="rust-toolchain.toml"><img alt="Rust" src="https://img.shields.io/badge/rust-1.90-DEA584?logo=rust&logoColor=white"></a>
     <a href="https://github.com/emilk/egui"><img alt="GUI" src="https://img.shields.io/badge/GUI-egui%20%2F%20eframe-FEBD2F"></a>
-    <img alt="Platform" src="https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-4A90D9">
+    <img alt="Platform" src="https://img.shields.io/badge/platform-Windows-4A90D9">
     <a href="https://github.com/yeqing17/fadb/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/yeqing17/fadb/actions/workflows/ci.yml/badge.svg"></a>
     <a href="LICENSE-MIT"><img alt="License: MIT OR Apache-2.0" src="https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue"></a>
   </p>
   <p><a href="README.md">中文</a> | <a href="README.en.md">English</a></p>
 </div>
 
-**fadb** is an independently implemented, pure-Rust desktop toolkit for inspecting and managing Android devices through ADB — lightweight, cross-platform, ready out of the box. See [`docs/feature-matrix.md`](docs/en/feature-matrix.md) for scope and roadmap, and [`CHANGELOG.md`](CHANGELOG.md) for the full history.
+**fadb** is an independently implemented, pure-Rust desktop toolkit for inspecting and managing Android devices through ADB — lightweight, ready out of the box. Windows is the supported platform for now. See [`docs/feature-matrix.md`](docs/en/feature-matrix.md) for scope and roadmap, and [`CHANGELOG.md`](CHANGELOG.md) for the full history.
 
 ## ✨ Features
 
@@ -67,7 +67,7 @@ Prefer no Rust toolchain? Grab the prebuilt Windows build from [Releases](https:
 | --- | --- |
 | Rust 1.90 | pinned by [`rust-toolchain.toml`](rust-toolchain.toml), with rustfmt and clippy included |
 | `adb` | found through `PATH`, `ANDROID_SDK_ROOT`, or `ANDROID_HOME`; alternatively set `FADB_ADB` to the direct path of the `adb` executable (highest priority; a missing path is reported prominently). If you do not have adb yet, the ADB section of the settings window links the official download page |
-| Desktop build prerequisites | the usual `eframe` build dependencies on Windows / macOS / Linux |
+| Desktop build prerequisites | the usual `eframe` build dependencies on Windows |
 
 ```bash
 cargo run -p fadb

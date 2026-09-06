@@ -1,6 +1,6 @@
 [package]
 name = "fadb"
-description = "A featherweight ADB toolbox: a pure-Rust, cross-platform desktop GUI for inspecting and managing Android devices."
+description = "A featherweight ADB toolbox: a pure-Rust desktop GUI for Windows to inspect and manage Android devices."
 version.workspace = true
 edition.workspace = true
 license.workspace = true

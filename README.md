@@ -5,14 +5,14 @@
     <a href="https://crates.io/crates/fadb"><img alt="crates.io" src="https://img.shields.io/crates/v/fadb?color=3DDC84"></a>
     <a href="rust-toolchain.toml"><img alt="Rust" src="https://img.shields.io/badge/rust-1.90-DEA584?logo=rust&logoColor=white"></a>
     <a href="https://github.com/emilk/egui"><img alt="GUI" src="https://img.shields.io/badge/GUI-egui%20%2F%20eframe-FEBD2F"></a>
-    <img alt="Platform" src="https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-4A90D9">
+    <img alt="Platform" src="https://img.shields.io/badge/platform-Windows-4A90D9">
     <a href="https://github.com/yeqing17/fadb/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/yeqing17/fadb/actions/workflows/ci.yml/badge.svg"></a>
     <a href="LICENSE-MIT"><img alt="License: MIT OR Apache-2.0" src="https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue"></a>
   </p>
   <p><a href="README.md">中文</a> | <a href="README.en.md">English</a></p>
 </div>
 
-**fadb** 是一个独立实现的纯 Rust 桌面工具集,通过 ADB 检查与管理 Android 设备——轻量、跨平台、开箱即用。功能边界与路线图见 [`docs/feature-matrix.md`](docs/feature-matrix.md),完整变更见 [`CHANGELOG.md`](CHANGELOG.md)。
+**fadb** 是一个独立实现的纯 Rust 桌面工具集,通过 ADB 检查与管理 Android 设备——轻量、开箱即用,当前支持 Windows。功能边界与路线图见 [`docs/feature-matrix.md`](docs/feature-matrix.md),完整变更见 [`CHANGELOG.md`](CHANGELOG.md)。
 
 ## ✨ 功能
 
@@ -67,7 +67,7 @@ cargo install fadb
 | --- | --- |
 | Rust 1.90 | 版本由 [`rust-toolchain.toml`](rust-toolchain.toml) 固定,rustfmt 与 clippy 一并就位 |
 | `adb` | 通过 `PATH`、`ANDROID_SDK_ROOT` 或 `ANDROID_HOME` 查找;也可设置 `FADB_ADB` 直接指定 `adb` 可执行文件路径(优先级最高,路径无效会在界面明确报错)。还没有 adb 时,设置窗口的 ADB 区域提供官方下载入口 |
-| 桌面构建依赖 | `eframe` 在 Windows / macOS / Linux 上的常规构建依赖 |
+| 桌面构建依赖 | `eframe` 在 Windows 上的常规构建依赖 |
 
 ```bash
 cargo run -p fadb
