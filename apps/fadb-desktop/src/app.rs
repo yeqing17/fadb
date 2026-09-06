@@ -648,57 +648,57 @@ impl FadbApp {
                 ui.label(text(self.language, "update.up_to_date"));
             }
             UpdateStatus::Available(info) => {
-                ui.horizontal(|ui| {
-                    ui.label(format!(
-                        "{} v{}",
-                        text(self.language, "update.available"),
-                        info.version
-                    ));
-                    // Platforms (or releases) without a matching binary only
-                    // get the link; with one, offer the in-app download.
-                    if info.asset_url.is_some()
-                        && ui.button(text(self.language, "update.download")).clicked()
-                    {
-                        self.update_state.status = UpdateStatus::Downloading {
-                            info: info.clone(),
-                            received: 0,
-                            total: info.asset_size,
-                        };
-                        self.send(BackendCommand::DownloadUpdate(info.clone()));
-                    }
-                    if ui
-                        .link(text(self.language, "update.open_releases"))
-                        .clicked()
-                    {
-                        ui.ctx().open_url(egui::OpenUrl::new_tab(info.url.clone()));
-                    }
-                });
+                // Grid cells are already left-to-right and vertically
+                // centered, so the text and the actions can be added directly
+                // to the cell; wrapping them in `horizontal` would sink them
+                // a few px below the left column (see the theme row above).
+                ui.label(format!(
+                    "{} v{}",
+                    text(self.language, "update.available"),
+                    info.version
+                ));
+                // Platforms (or releases) without a matching binary only get
+                // the release page; with one, offer the in-app download.
+                if info.asset_url.is_some()
+                    && ui.button(text(self.language, "update.download")).clicked()
+                {
+                    self.update_state.status = UpdateStatus::Downloading {
+                        info: info.clone(),
+                        received: 0,
+                        total: info.asset_size,
+                    };
+                    self.send(BackendCommand::DownloadUpdate(info.clone()));
+                }
+                if ui
+                    .button(text(self.language, "update.open_releases"))
+                    .clicked()
+                {
+                    ui.ctx().open_url(egui::OpenUrl::new_tab(info.url.clone()));
+                }
             }
             UpdateStatus::Downloading {
                 info,
                 received,
                 total,
             } => {
-                ui.vertical(|ui| {
-                    // Indeterminate when the server skipped Content-Length.
-                    #[allow(clippy::cast_precision_loss)] // ratios only need a few digits
-                    let (value, indeterminate) = match total {
-                        Some(total) if total > 0 => (received as f32 / total as f32, false),
-                        _ => (0.0, true),
-                    };
-                    ui.add(
-                        egui::ProgressBar::new(value)
-                            .animate(indeterminate)
-                            .desired_width(180.0),
-                    );
-                    if ui
-                        .button(text(self.language, "update.cancel_download"))
-                        .clicked()
-                    {
-                        self.update_state.status = UpdateStatus::Available(info);
-                        self.send(BackendCommand::CancelUpdateDownload);
-                    }
-                });
+                // Indeterminate when the server skipped Content-Length.
+                #[allow(clippy::cast_precision_loss)] // ratios only need a few digits
+                let (value, indeterminate) = match total {
+                    Some(total) if total > 0 => (received as f32 / total as f32, false),
+                    _ => (0.0, true),
+                };
+                ui.add(
+                    egui::ProgressBar::new(value)
+                        .animate(indeterminate)
+                        .desired_width(160.0),
+                );
+                if ui
+                    .button(text(self.language, "update.cancel_download"))
+                    .clicked()
+                {
+                    self.update_state.status = UpdateStatus::Available(info);
+                    self.send(BackendCommand::CancelUpdateDownload);
+                }
             }
             UpdateStatus::Downloaded => {
                 // A successful swap never returns: the new process took over.
@@ -830,36 +830,37 @@ impl FadbApp {
                     .spacing([24.0, 6.0])
                     .show(ui, |ui| {
                         ui.label(text(self.language, "theme"));
-                        ui.horizontal(|ui| {
-                            if ui
-                                .selectable_label(!self.dark_mode, text(self.language, "light"))
-                                .clicked()
-                                && self.dark_mode
-                            {
-                                self.dark_mode = false;
-                                context.set_theme(egui::ThemePreference::Light);
-                            }
-                            if ui
-                                .selectable_label(self.dark_mode, text(self.language, "dark"))
-                                .clicked()
-                                && !self.dark_mode
-                            {
-                                self.dark_mode = true;
-                                context.set_theme(egui::ThemePreference::Dark);
-                            }
-                        });
+                        // Grid cells are already left-to-right and vertically
+                        // centered, so widgets can be added directly; wrapping
+                        // them in `horizontal` would reserve an interact-sized
+                        // row first and sink the text a few px below the left
+                        // column.
+                        if ui
+                            .selectable_label(!self.dark_mode, text(self.language, "light"))
+                            .clicked()
+                            && self.dark_mode
+                        {
+                            self.dark_mode = false;
+                            context.set_theme(egui::ThemePreference::Light);
+                        }
+                        if ui
+                            .selectable_label(self.dark_mode, text(self.language, "dark"))
+                            .clicked()
+                            && !self.dark_mode
+                        {
+                            self.dark_mode = true;
+                            context.set_theme(egui::ThemePreference::Dark);
+                        }
                         ui.end_row();
 
                         ui.label(text(self.language, "language"));
-                        ui.horizontal(|ui| {
-                            let is_chinese = self.language == Language::Chinese;
-                            if ui.selectable_label(is_chinese, "中文").clicked() && !is_chinese {
-                                self.language = Language::Chinese;
-                            }
-                            if ui.selectable_label(!is_chinese, "English").clicked() && is_chinese {
-                                self.language = Language::English;
-                            }
-                        });
+                        let is_chinese = self.language == Language::Chinese;
+                        if ui.selectable_label(is_chinese, "中文").clicked() && !is_chinese {
+                            self.language = Language::Chinese;
+                        }
+                        if ui.selectable_label(!is_chinese, "English").clicked() && is_chinese {
+                            self.language = Language::English;
+                        }
                         ui.end_row();
                     });
                 ui.add_space(8.0);
@@ -920,24 +921,21 @@ impl FadbApp {
             .spacing([24.0, 6.0])
             .show(ui, |ui| {
                 ui.label(text(self.language, "diagnostics"));
-                ui.horizontal(|ui| {
-                    theme::button_aligned_label(
-                        ui,
-                        self.adb_path
-                            .as_deref()
-                            .unwrap_or(text(self.language, "unknown")),
-                    );
-                    // Toggle: click once to expand the ADB details window,
-                    // click again to close it.
-                    let label = if self.windows.diagnostics {
-                        text(self.language, "hide")
-                    } else {
-                        text(self.language, "details")
-                    };
-                    if ui.button(label).clicked() {
-                        self.windows.diagnostics = !self.windows.diagnostics;
-                    }
-                });
+                ui.label(
+                    self.adb_path
+                        .as_deref()
+                        .unwrap_or(text(self.language, "unknown")),
+                );
+                // Toggle: click once to expand the ADB details window,
+                // click again to close it.
+                let label = if self.windows.diagnostics {
+                    text(self.language, "hide")
+                } else {
+                    text(self.language, "details")
+                };
+                if ui.button(label).clicked() {
+                    self.windows.diagnostics = !self.windows.diagnostics;
+                }
                 ui.end_row();
                 // The download entry lives here too: someone without adb
                 // should not have to open the details window to learn where
