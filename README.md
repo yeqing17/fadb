@@ -1,7 +1,7 @@
 <div align="center">
   <img src="docs/social-preview.png" width="640" alt="fadb — a featherweight ADB toolbox, in Rust"/>
   <p>
-    <a href="CHANGELOG.md"><img alt="Version" src="https://img.shields.io/badge/version-0.8.8-3DDC84"></a>
+    <a href="CHANGELOG.md"><img alt="Version" src="https://img.shields.io/badge/version-0.8.9-3DDC84"></a>
     <a href="rust-toolchain.toml"><img alt="Rust" src="https://img.shields.io/badge/rust-1.90-DEA584?logo=rust&logoColor=white"></a>
     <a href="https://github.com/emilk/egui"><img alt="GUI" src="https://img.shields.io/badge/GUI-egui%20%2F%20eframe-FEBD2F"></a>
     <img alt="Platform" src="https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-4A90D9">
@@ -47,7 +47,7 @@
 
 - 简体中文 / English 一键切换,浅色 / 深色主题。
 - 左侧导航可折叠为图标栏,折叠状态跨启动记忆。
-- 设置窗口(顶栏齿轮)集中提供主题、语言、ADB 信息(可执行文件路径、版本、设备数)与关于信息。
+- 设置窗口(顶栏齿轮)集中提供主题、语言、ADB 信息(可执行文件路径、版本、设备数)与关于信息(版本、检查更新)。
 - 无边框自绘窗口:标题栏拖拽移动、边缘拖拽缩放、双击标题栏最大化。
 
 ## 🚀 快速开始
