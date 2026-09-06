@@ -1,7 +1,7 @@
 <div align="center">
   <img src="docs/social-preview.png" width="640" alt="fadb — a featherweight ADB toolbox, in Rust"/>
   <p>
-    <a href="CHANGELOG.md"><img alt="Version" src="https://img.shields.io/badge/version-0.8.9-3DDC84"></a>
+    <a href="CHANGELOG.md"><img alt="Version" src="https://img.shields.io/github/v/tag/yeqing17/fadb?label=version&sort=semver&color=3DDC84"></a>
     <a href="rust-toolchain.toml"><img alt="Rust" src="https://img.shields.io/badge/rust-1.90-DEA584?logo=rust&logoColor=white"></a>
     <a href="https://github.com/emilk/egui"><img alt="GUI" src="https://img.shields.io/badge/GUI-egui%20%2F%20eframe-FEBD2F"></a>
     <img alt="Platform" src="https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-4A90D9">
