@@ -944,6 +944,13 @@ pub struct UpdateInfo {
     pub version: String,
     /// Browser URL of the release page.
     pub url: String,
+    /// Download URL of the prebuilt binary matching the running platform;
+    /// absent where the release publishes no such artifact.
+    pub asset_url: Option<String>,
+    /// Advertised byte size of the binary asset, for download progress.
+    pub asset_size: Option<u64>,
+    /// URL of the release's SHA256SUMS manifest covering the binary.
+    pub checksum_url: Option<String>,
 }
 
 /// Outcome of comparing the running version against the latest release.
@@ -1124,6 +1131,13 @@ pub enum BackendCommand {
     /// Query GitHub for the latest published release (update check). The
     /// runtime answers [`BackendEvent::UpdateChecked`] exactly once.
     CheckForUpdates,
+    /// Download the advertised update binary and stage it next to the running
+    /// executable. The runtime answers
+    /// [`BackendEvent::UpdateDownloadProgress`] and, once,
+    /// [`BackendEvent::UpdateDownloadFinished`].
+    DownloadUpdate(UpdateInfo),
+    /// Cancel an in-flight update download and discard the partial file.
+    CancelUpdateDownload,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -1421,6 +1435,15 @@ pub enum BackendEvent {
     /// Result of an update check: the comparison outcome, or a
     /// [`BridgeError`] describing why the GitHub Releases API was unreachable.
     UpdateChecked(Result<UpdateCheckOutcome, BridgeError>),
+    /// Byte-level progress of an update download. `total` mirrors the asset
+    /// size advertised by the release, when present.
+    UpdateDownloadProgress {
+        received: u64,
+        total: Option<u64>,
+    },
+    /// The update download ended: the binary is verified and staged next to
+    /// the executable, or the attempt failed (cancellation included).
+    UpdateDownloadFinished(Result<(), BridgeError>),
 }
 
 #[cfg(test)]

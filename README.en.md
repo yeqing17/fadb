@@ -47,7 +47,7 @@
 
 - Simplified Chinese / English switch and light / dark themes.
 - The left navigation collapses to an icon rail; the choice is remembered across launches.
-- The settings window (gear in the top bar) gathers theme, language, ADB info (executable path, version, device count), and about information (version, update check).
+- The settings window (gear in the top bar) gathers theme, language, ADB info (executable path, version, device count), and about information (version, update check, in-app upgrade).
 - Frameless custom window: drag the title bar to move, drag the edges to resize, double-click to maximize.
 
 ## 🚀 Getting started

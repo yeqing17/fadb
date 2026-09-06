@@ -28,6 +28,9 @@ serde.workspace = true
 serde_json.workspace = true
 reqwest.workspace = true
 semver.workspace = true
+# Update downloads are hashed while streaming and checked against the
+# release's published SHA256SUMS manifest before the swap is allowed.
+sha2.workspace = true
 egui_plot.workspace = true
 
 [target.'cfg(windows)'.build-dependencies]

@@ -14,6 +14,13 @@ use eframe::egui;
 use tracing_subscriber::EnvFilter;
 
 fn main() -> eframe::Result<()> {
+    // Leftover from a previous in-app update swap: the previous binary is
+    // kept as `.old` only so the running exe can be renamed over; once we are
+    // the fresh process it is dead weight.
+    if let Ok(exe) = std::env::current_exe() {
+        let _ = std::fs::remove_file(exe.with_extension("exe.old"));
+    }
+
     tracing_subscriber::fmt()
         .with_env_filter(
             EnvFilter::from_default_env()

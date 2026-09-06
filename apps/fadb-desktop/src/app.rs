@@ -15,7 +15,7 @@ use crate::{
     },
     platform,
     quick_commands::{QuickCommand, QuickCommandStore},
-    runtime::{MirrorFrameBuffer, RuntimeBridge},
+    runtime::{MirrorFrameBuffer, RuntimeBridge, staged_update_path},
     theme, wireless,
 };
 
@@ -126,8 +126,8 @@ struct WindowState {
     settings: bool,
 }
 
-/// Lifecycle of the update check shown in the settings window (and toasted
-/// when a check that ran unnoticed at startup finds something).
+/// Lifecycle of the update check and download shown in the settings window
+/// (and toasted when a check that ran unnoticed at startup finds something).
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 enum UpdateStatus {
     /// No check has run yet this launch.
@@ -136,7 +136,21 @@ enum UpdateStatus {
     Checking,
     UpToDate,
     Available(UpdateInfo),
-    Failed(String),
+    /// A verified binary is streaming to disk. `total` stays `None` when the
+    /// server did not advertise a content length (the bar then animates).
+    Downloading {
+        info: UpdateInfo,
+        received: u64,
+        total: Option<u64>,
+    },
+    /// Verified and staged next to the running exe, waiting for the
+    /// user-picked restart moment.
+    Downloaded,
+    Failed {
+        message_key: &'static str,
+        detail: String,
+        hint_key: &'static str,
+    },
 }
 
 /// Update-check UI state plus the persisted preferences.
@@ -418,8 +432,48 @@ impl FadbApp {
                             }
                         };
                     }
-                    Err(error) => self.update_state.status = UpdateStatus::Failed(error.detail),
+                    Err(error) => {
+                        self.update_state.status = UpdateStatus::Failed {
+                            message_key: "update.check_failed",
+                            detail: error.detail,
+                            hint_key: "update.check_failed_hint",
+                        };
+                    }
                 },
+                BackendEvent::UpdateDownloadProgress { received, total } => {
+                    // Progress for an attempt the UI already gave up on
+                    // (cancelled) lands here and is dropped by the guard.
+                    if let UpdateStatus::Downloading {
+                        received: seen,
+                        total: seen_total,
+                        ..
+                    } = &mut self.update_state.status
+                    {
+                        *seen = received;
+                        if total.is_some() {
+                            *seen_total = total;
+                        }
+                    }
+                }
+                BackendEvent::UpdateDownloadFinished(Err(error))
+                    if error.message_key == "update.cancelled" => {}
+                BackendEvent::UpdateDownloadFinished(result) => {
+                    // A cancel puts the status back to Available before the
+                    // backend's acknowledgement arrives, so only still-downloading
+                    // states accept the outcome.
+                    if matches!(self.update_state.status, UpdateStatus::Downloading { .. }) {
+                        match result {
+                            Ok(()) => self.update_state.status = UpdateStatus::Downloaded,
+                            Err(error) => {
+                                self.update_state.status = UpdateStatus::Failed {
+                                    message_key: "update.download_failed",
+                                    detail: error.detail,
+                                    hint_key: "update.download_failed_hint",
+                                };
+                            }
+                        }
+                    }
+                }
                 BackendEvent::DevicesChanged(snapshot) => {
                     if snapshot.selected != self.snapshot.selected {
                         self.overview = None;
@@ -579,6 +633,101 @@ impl FadbApp {
         }
     }
 
+    /// Right-hand cell of the check-for-updates row in the settings window:
+    /// progress, verdict, download controls, a release-page link, or the
+    /// failure reason. A method rather than a free function because each
+    /// state offers a different action (download / cancel / restart).
+    fn update_status_cell(&mut self, ui: &mut egui::Ui) {
+        let status = self.update_state.status.clone();
+        match status {
+            UpdateStatus::Idle => {}
+            UpdateStatus::Checking => {
+                ui.label(text(self.language, "update.checking"));
+            }
+            UpdateStatus::UpToDate => {
+                ui.label(text(self.language, "update.up_to_date"));
+            }
+            UpdateStatus::Available(info) => {
+                ui.horizontal(|ui| {
+                    ui.label(format!(
+                        "{} v{}",
+                        text(self.language, "update.available"),
+                        info.version
+                    ));
+                    // Platforms (or releases) without a matching binary only
+                    // get the link; with one, offer the in-app download.
+                    if info.asset_url.is_some()
+                        && ui.button(text(self.language, "update.download")).clicked()
+                    {
+                        self.update_state.status = UpdateStatus::Downloading {
+                            info: info.clone(),
+                            received: 0,
+                            total: info.asset_size,
+                        };
+                        self.send(BackendCommand::DownloadUpdate(info.clone()));
+                    }
+                    if ui
+                        .link(text(self.language, "update.open_releases"))
+                        .clicked()
+                    {
+                        ui.ctx().open_url(egui::OpenUrl::new_tab(info.url.clone()));
+                    }
+                });
+            }
+            UpdateStatus::Downloading {
+                info,
+                received,
+                total,
+            } => {
+                ui.vertical(|ui| {
+                    // Indeterminate when the server skipped Content-Length.
+                    #[allow(clippy::cast_precision_loss)] // ratios only need a few digits
+                    let (value, indeterminate) = match total {
+                        Some(total) if total > 0 => (received as f32 / total as f32, false),
+                        _ => (0.0, true),
+                    };
+                    ui.add(
+                        egui::ProgressBar::new(value)
+                            .animate(indeterminate)
+                            .desired_width(180.0),
+                    );
+                    if ui
+                        .button(text(self.language, "update.cancel_download"))
+                        .clicked()
+                    {
+                        self.update_state.status = UpdateStatus::Available(info);
+                        self.send(BackendCommand::CancelUpdateDownload);
+                    }
+                });
+            }
+            UpdateStatus::Downloaded => {
+                // A successful swap never returns: the new process took over.
+                if ui.button(text(self.language, "update.restart")).clicked()
+                    && let Err(detail) = apply_pending_update()
+                {
+                    self.update_state.status = UpdateStatus::Failed {
+                        message_key: "update.download_failed",
+                        detail,
+                        hint_key: "update.download_failed_hint",
+                    };
+                }
+            }
+            UpdateStatus::Failed {
+                message_key,
+                detail,
+                hint_key,
+            } => {
+                ui.vertical(|ui| {
+                    ui.label(RichText::new(format!(
+                        "{} ({detail})",
+                        text(self.language, message_key)
+                    )));
+                    ui.small(text(self.language, hint_key));
+                });
+            }
+        }
+    }
+
     fn selected_record(&self) -> Option<&DeviceRecord> {
         let selected = self.snapshot.selected.as_ref()?;
         self.snapshot
@@ -734,14 +883,23 @@ impl FadbApp {
                         ui.label(concat!("Fadb v", env!("CARGO_PKG_VERSION")));
                         ui.hyperlink_to("GitHub", "https://github.com/yeqing17/fadb");
                         ui.end_row();
+                        // No re-entry while a download is in flight or already
+                        // staged: a fresh check would clobber the state.
+                        let update_busy = matches!(
+                            self.update_state.status,
+                            UpdateStatus::Downloading { .. } | UpdateStatus::Downloaded
+                        );
                         if ui
-                            .button(text(self.language, "settings.check_updates"))
+                            .add_enabled(
+                                !update_busy,
+                                egui::Button::new(text(self.language, "settings.check_updates")),
+                            )
                             .clicked()
                         {
                             self.update_state.status = UpdateStatus::Checking;
                             self.send(BackendCommand::CheckForUpdates);
                         }
-                        update_status_label(ui, self.language, &self.update_state.status);
+                        self.update_status_cell(ui);
                         ui.end_row();
                         ui.checkbox(
                             &mut self.update_state.auto_check,
@@ -1782,37 +1940,33 @@ fn caption_button(
     .on_hover_text(tooltip)
 }
 
-/// Right-hand cell of the check-for-updates row in the settings window:
-/// progress, verdict, a release-page link, or the failure reason.
-fn update_status_label(ui: &mut egui::Ui, language: Language, status: &UpdateStatus) {
-    match status {
-        UpdateStatus::Idle => {}
-        UpdateStatus::Checking => {
-            ui.label(text(language, "update.checking"));
-        }
-        UpdateStatus::UpToDate => {
-            ui.label(text(language, "update.up_to_date"));
-        }
-        UpdateStatus::Available(info) => {
-            ui.horizontal(|ui| {
-                ui.label(format!(
-                    "{} v{}",
-                    text(language, "update.available"),
-                    info.version
-                ));
-                if ui.link(text(language, "update.open_releases")).clicked() {
-                    ui.ctx().open_url(egui::OpenUrl::new_tab(info.url.clone()));
-                }
-            });
-        }
-        UpdateStatus::Failed(detail) => {
-            ui.vertical(|ui| {
-                ui.label(RichText::new(format!(
-                    "{} ({detail})",
-                    text(language, "update.check_failed")
-                )));
-                ui.small(text(language, "update.check_failed_hint"));
-            });
+/// Swap the staged update over the running executable and relaunch.
+///
+/// Windows refuses to overwrite a running exe but happily renames it, so the
+/// dance is: running → `.old`, staged `.new` → running name, spawn, exit.
+/// `main` deletes the leftover `.old` on the next launch. Every failure
+/// restores the previous layout so the app keeps working in place.
+fn apply_pending_update() -> Result<(), String> {
+    let exe = std::env::current_exe().map_err(|error| error.to_string())?;
+    let staged = staged_update_path(&exe);
+    if !staged.exists() {
+        return Err("the staged update is gone".to_owned());
+    }
+    let backup = exe.with_extension("exe.old");
+    let _ = std::fs::remove_file(&backup);
+    std::fs::rename(&exe, &backup)
+        .map_err(|error| format!("cannot move the running exe aside: {error}"))?;
+    if let Err(error) = std::fs::rename(&staged, &exe) {
+        let _ = std::fs::rename(&backup, &exe);
+        return Err(format!("cannot put the update in place: {error}"));
+    }
+    match std::process::Command::new(&exe).spawn() {
+        Ok(_) => std::process::exit(0),
+        Err(error) => {
+            // Put the old binary back; the staged one stays for another try.
+            let _ = std::fs::rename(&exe, &staged);
+            let _ = std::fs::rename(&backup, &exe);
+            Err(format!("cannot launch the updated exe: {error}"))
         }
     }
 }

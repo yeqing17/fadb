@@ -86,6 +86,13 @@ pub fn text(language: Language, key: &str) -> &'static str {
         (Language::Chinese, "update.check_failed_hint") => {
             "无法连接 GitHub。请确认系统代理可用，或在启动前设置 https_proxy 环境变量，然后重试。"
         }
+        (Language::Chinese, "update.download") => "下载并安装",
+        (Language::Chinese, "update.cancel_download") => "取消下载",
+        (Language::Chinese, "update.restart") => "重启并完成更新",
+        (Language::Chinese, "update.download_failed") => "下载更新失败",
+        (Language::Chinese, "update.download_failed_hint") => {
+            "文件可能被杀毒软件拦截，或目录需要管理员权限。可把程序移到可写目录后重试，或到发布页手动下载。"
+        }
         (Language::Chinese, "close") => "关闭",
         (Language::Chinese, "fake") => "模拟设备",
         (Language::Chinese, "connect_android") => "连接 Android 设备",
@@ -536,6 +543,15 @@ pub fn text(language: Language, key: &str) -> &'static str {
             "Could not reach GitHub. Make sure your system proxy is up (or set https_proxy \
              before launching), then retry."
         }
+        (_, "update.download") => "Download and install",
+        (_, "update.cancel_download") => "Cancel download",
+        (_, "update.restart") => "Restart to finish updating",
+        (_, "update.download_failed") => "Update download failed",
+        (_, "update.download_failed_hint") => {
+            "The file may have been blocked by antivirus software, or the folder needs admin \
+             rights. Move the app to a writable folder and retry, or download it manually from \
+             the release page."
+        }
         (_, "close") => "Close",
         (_, "fake") => "Fake device",
         (_, "connect_android") => "Connect an Android device",
@@ -967,6 +983,11 @@ mod tests {
         "update.open_releases",
         "update.check_failed",
         "update.check_failed_hint",
+        "update.download",
+        "update.cancel_download",
+        "update.restart",
+        "update.download_failed",
+        "update.download_failed_hint",
     ];
 
     #[test]

@@ -81,6 +81,9 @@ jobs:
           Copy-Item $binary "dist/$bundleName/fadb-desktop.exe"
           Copy-Item README.md, LICENSE-MIT, LICENSE-APACHE, NOTICE "dist/$bundleName/"
           Compress-Archive -Path "dist/$bundleName" -DestinationPath "dist/$bundleName.zip"
+          # Bare executable next to the bundle: this is the asset the in-app
+          # self-update downloads (no zip parsing in the app).
+          Copy-Item $binary "dist/$bundleName.exe"
 
           Add-Type -AssemblyName System.IO.Compression.FileSystem
           $archive = [System.IO.Compression.ZipFile]::OpenRead("dist/$bundleName.zip")
@@ -105,7 +108,9 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: fadb-release-windows-x86_64
-          path: dist/*.zip
+          path: |
+            dist/*.zip
+            dist/*.exe
           if-no-files-found: error
           retention-days: 7
 
@@ -131,16 +136,21 @@ jobs:
             echo "Expected exactly one Windows release archive" >&2
             exit 1
           fi
+          mapfile -t executables < <(find dist -maxdepth 1 -type f -name '*.exe' -printf '%f\n' | sort)
+          if [[ "${#executables[@]}" -ne 1 ]]; then
+            echo "Expected exactly one Windows release executable" >&2
+            exit 1
+          fi
           checksum="fadb-desktop-${GITHUB_REF_NAME}-SHA256SUMS.txt"
           (
             cd dist
-            sha256sum "${archives[0]}" > "$checksum"
+            sha256sum "${archives[0]}" "${executables[0]}" > "$checksum"
           )
       - name: Create or update GitHub Release
         shell: bash
         run: |
           set -euo pipefail
-          assets=(dist/*.zip dist/*-SHA256SUMS.txt)
+          assets=(dist/*.zip dist/*.exe dist/*-SHA256SUMS.txt)
           if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
             gh release upload "$GITHUB_REF_NAME" "${assets[@]}" --clobber
           else

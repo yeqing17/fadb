@@ -38,9 +38,22 @@ const DEVTOOLS_HTTP_TIMEOUT: Duration = Duration::from_secs(4);
 /// Total budget for the scrcpy server to come up and announce its video
 /// stream through the forward tunnel.
 const MIRROR_SERVER_TIMEOUT: Duration = Duration::from_secs(15);
-/// Budget for one update check against the GitHub Releases API.
+/// Budget for one update check against the GitHub Releases API. Also bounds
+/// the connect and stall phases of an update download (the download itself is
+/// never total-timeout bound: a large binary on a slow link is legitimate).
 const UPDATE_HTTP_TIMEOUT: Duration = Duration::from_secs(10);
 const RELEASES_API_URL: &str = "https://api.github.com/repos/yeqing17/fadb/releases/latest";
+/// Release-asset suffix identifying the bare executable this build can swap
+/// itself with. `None` where no such asset is published (non-Windows builds):
+/// the update flow then degrades to opening the release page.
+#[cfg(all(target_os = "windows", target_arch = "x86_64"))]
+const UPDATE_BINARY_SUFFIX: Option<&str> = Some("x86_64-pc-windows-msvc.exe");
+#[cfg(not(all(target_os = "windows", target_arch = "x86_64")))]
+const UPDATE_BINARY_SUFFIX: Option<&str> = None;
+/// Release-asset suffix of the `sha256sum` manifest covering the binaries.
+const UPDATE_CHECKSUM_SUFFIX: &str = "SHA256SUMS.txt";
+/// Minimum spacing between two update-download progress events.
+const UPDATE_PROGRESS_INTERVAL: Duration = Duration::from_millis(100);
 /// One local connect attempt against adb's forward listener.
 const MIRROR_CONNECT_ATTEMPT: Duration = Duration::from_secs(1);
 /// Pause between connect attempts while the server is still booting.
@@ -207,6 +220,9 @@ async fn run_backend(
     let webview_forwards = Arc::new(std::sync::Mutex::new(Vec::<u16>::new()));
     let mut mirror: Option<ActiveMirror> = None;
     let mut transfers = HashMap::<OperationId, ActiveTransfer>::new();
+    // Token of the in-flight update download; `None` (or a cancelled token)
+    // means a new `DownloadUpdate` may spawn one.
+    let mut update_download: Option<CancellationToken> = None;
     let shell_event_context = ShellEventContext {
         events: events.clone(),
         context: context.clone(),
@@ -309,6 +325,28 @@ async fn run_backend(
                     BackendCommand::CheckForUpdates => {
                         let outcome = check_for_update().await;
                         send_event(&events, &context, BackendEvent::UpdateChecked(outcome)).await;
+                    }
+                    BackendCommand::DownloadUpdate(info) => {
+                        // One download at a time; a request while one is
+                        // already running is dropped rather than queued.
+                        if update_download
+                            .as_ref()
+                            .is_none_or(CancellationToken::is_cancelled)
+                        {
+                            let token = CancellationToken::new();
+                            update_download = Some(token.clone());
+                            tokio::spawn(download_update(
+                                info,
+                                events.clone(),
+                                context.clone(),
+                                token,
+                            ));
+                        }
+                    }
+                    BackendCommand::CancelUpdateDownload => {
+                        if let Some(token) = &update_download {
+                            token.cancel();
+                        }
                     }
                     BackendCommand::DisconnectDevice(endpoint) => {
                         match transport.disconnect_endpoint(&endpoint).await {
@@ -2689,30 +2727,23 @@ fn fake_backend_enabled() -> bool {
 /// Query the GitHub Releases API for the latest published release and compare
 /// it against the running build.
 ///
-/// reqwest honors the standard proxy environment variables, so a user behind
-/// a system proxy reaches GitHub the same way their shell does; anything that
-/// goes wrong (offline, blocked, rate limited) degrades to a [`BridgeError`]
-/// the UI can show inline. `/releases/latest` already skips drafts and
-/// prereleases.
+/// reqwest honors the OS proxy settings (environment variables and the system
+/// configuration), so a user behind a proxy reaches GitHub the same way their
+/// shell does; anything that goes wrong (offline, blocked, rate limited)
+/// degrades to a [`BridgeError`] the UI can show inline. `/releases/latest`
+/// already skips drafts and prereleases.
 async fn check_for_update() -> Result<UpdateCheckOutcome, BridgeError> {
-    #[derive(serde::Deserialize)]
-    struct LatestRelease {
-        #[serde(default)]
-        tag_name: String,
-        #[serde(default)]
-        html_url: String,
-    }
-
+    let failure = |error: reqwest::Error| {
+        BridgeError::new(
+            ErrorCode::Internal,
+            "update.check_failed",
+            error.to_string(),
+        )
+    };
     let client = reqwest::Client::builder()
         .timeout(UPDATE_HTTP_TIMEOUT)
         .build()
-        .map_err(|error| {
-            BridgeError::new(
-                ErrorCode::Internal,
-                "update.check_failed",
-                error.to_string(),
-            )
-        })?;
+        .map_err(failure)?;
     // The GitHub API answers 403 to requests without a User-Agent.
     let response = client
         .get(RELEASES_API_URL)
@@ -2723,77 +2754,312 @@ async fn check_for_update() -> Result<UpdateCheckOutcome, BridgeError> {
         .send()
         .await
         .and_then(reqwest::Response::error_for_status)
-        .map_err(|error| {
-            BridgeError::new(
-                ErrorCode::Internal,
-                "update.check_failed",
-                error.to_string(),
-            )
-        })?;
-    let release: LatestRelease = response.json::<LatestRelease>().await.map_err(|error| {
-        BridgeError::new(
-            ErrorCode::Internal,
-            "update.check_failed",
-            error.to_string(),
-        )
-    })?;
-    Ok(evaluate_update(
-        &release.tag_name,
-        &release.html_url,
-        env!("CARGO_PKG_VERSION"),
-    ))
+        .map_err(failure)?;
+    let release = response.json::<LatestRelease>().await.map_err(failure)?;
+    Ok(evaluate_update(&release, env!("CARGO_PKG_VERSION")))
 }
 
-/// Compare a release tag against the running version. Unparseable tags (and
-/// empty responses) resolve to [`UpdateCheckOutcome::UpToDate`]: a malformed
-/// advertisement should stay quiet rather than nag.
-fn evaluate_update(tag_name: &str, url: &str, current: &str) -> UpdateCheckOutcome {
+/// Subset of the GitHub release JSON the updater consumes.
+#[derive(serde::Deserialize)]
+struct LatestRelease {
+    #[serde(default)]
+    tag_name: String,
+    #[serde(default)]
+    html_url: String,
+    #[serde(default)]
+    assets: Vec<ReleaseAsset>,
+}
+
+/// One downloadable file attached to a release.
+#[derive(serde::Deserialize)]
+struct ReleaseAsset {
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    size: u64,
+    #[serde(default)]
+    browser_download_url: String,
+}
+
+/// Compare a release against the running version. Unparseable tags (and empty
+/// responses) resolve to [`UpdateCheckOutcome::UpToDate`]: a malformed
+/// advertisement should stay quiet rather than nag. When a newer version is
+/// found, the assets matching this platform's suffixes are carried along so
+/// the UI can offer an in-app download; without them it degrades to a link.
+fn evaluate_update(release: &LatestRelease, current: &str) -> UpdateCheckOutcome {
     let parse = |text: &str| {
         text.trim()
             .trim_start_matches(['v', 'V'])
             .parse::<semver::Version>()
             .ok()
     };
-    let (Some(latest), Some(running)) = (parse(tag_name), parse(current)) else {
+    let (Some(latest), Some(running)) = (parse(&release.tag_name), parse(current)) else {
         return UpdateCheckOutcome::UpToDate;
     };
-    if latest > running {
-        UpdateCheckOutcome::Available(UpdateInfo {
-            version: latest.to_string(),
-            url: url.to_owned(),
-        })
-    } else {
-        UpdateCheckOutcome::UpToDate
+    if latest <= running {
+        return UpdateCheckOutcome::UpToDate;
     }
+    let (binary, checksum) = select_update_assets(&release.assets, UPDATE_BINARY_SUFFIX);
+    UpdateCheckOutcome::Available(UpdateInfo {
+        version: latest.to_string(),
+        url: release.html_url.clone(),
+        asset_url: binary.map(|asset| asset.browser_download_url.clone()),
+        asset_size: binary.map(|asset| asset.size),
+        checksum_url: binary
+            .and(checksum)
+            .map(|asset| asset.browser_download_url.clone()),
+    })
+}
+
+/// Pick the release assets this build can self-update from: the bare binary
+/// whose name ends with `binary_suffix` (see [`UPDATE_BINARY_SUFFIX`]) plus
+/// the checksum manifest. Without a binary there is nothing to verify, so
+/// both come back `None` and the update flow degrades to a plain link.
+fn select_update_assets<'a>(
+    assets: &'a [ReleaseAsset],
+    binary_suffix: Option<&str>,
+) -> (Option<&'a ReleaseAsset>, Option<&'a ReleaseAsset>) {
+    let Some(suffix) = binary_suffix else {
+        return (None, None);
+    };
+    let binary = assets.iter().find(|asset| asset.name.ends_with(suffix));
+    let checksum = binary.and_then(|_| {
+        assets
+            .iter()
+            .find(|asset| asset.name.ends_with(UPDATE_CHECKSUM_SUFFIX))
+    });
+    (binary, checksum)
+}
+
+/// Pull the expected digest for `asset_name` out of a `sha256sum`-style
+/// manifest (`<hash>  <name>` per line). Hash case is cosmetic, so the
+/// returned digest is normalized to lowercase.
+fn parse_checksums(manifest: &str, asset_name: &str) -> Option<String> {
+    manifest.lines().find_map(|line| {
+        let mut fields = line.split_whitespace();
+        let digest = fields.next()?;
+        let name = fields.next()?;
+        (name == asset_name && digest.len() == 64 && digest.chars().all(|c| c.is_ascii_hexdigit()))
+            .then(|| digest.to_ascii_lowercase())
+    })
+}
+
+/// `<exe>.download` scratch path: bytes land here until the checksum passes,
+/// so a half-written binary is never mistaken for an update.
+fn partial_download_path(exe: &std::path::Path) -> PathBuf {
+    exe.with_extension("exe.download")
+}
+
+/// `<exe>.new` staging path the UI-triggered swap renames over the running
+/// binary (Windows lets a running executable rename itself, not overwrite
+/// itself, hence the two-step dance).
+pub(crate) fn staged_update_path(exe: &std::path::Path) -> PathBuf {
+    exe.with_extension("exe.new")
+}
+
+/// Download the binary advertised by `info` next to the running executable,
+/// verify it against the release's checksum manifest, and stage it for the
+/// UI-triggered swap. Progress is throttled to one event per
+/// [`UPDATE_PROGRESS_INTERVAL`]; cancellation or any failure deletes the
+/// partial file and is reported through `UpdateDownloadFinished`.
+async fn download_update(
+    info: UpdateInfo,
+    events: mpsc::Sender<BackendEvent>,
+    context: egui::Context,
+    cancel: CancellationToken,
+) {
+    let scratch = std::env::current_exe()
+        .ok()
+        .map(|exe| (partial_download_path(&exe), staged_update_path(&exe)));
+    let outcome = match scratch.as_ref() {
+        Some((partial, staging)) => {
+            stream_update(&info, partial, staging, &events, &context, &cancel).await
+        }
+        None => Err(BridgeError::new(
+            ErrorCode::Internal,
+            "update.stage_failed",
+            "cannot locate the running executable".to_owned(),
+        )),
+    };
+    if outcome.is_err()
+        && let Some((partial, _)) = &scratch
+    {
+        let _ = tokio::fs::remove_file(partial).await;
+    }
+    send_event(
+        &events,
+        &context,
+        BackendEvent::UpdateDownloadFinished(outcome),
+    )
+    .await;
+}
+
+async fn stream_update(
+    info: &UpdateInfo,
+    partial: &std::path::Path,
+    staging: &std::path::Path,
+    events: &mpsc::Sender<BackendEvent>,
+    context: &egui::Context,
+    cancel: &CancellationToken,
+) -> Result<(), BridgeError> {
+    use sha2::Digest as _;
+    use std::fmt::Write as _;
+    use tokio::io::AsyncWriteExt as _;
+
+    fn fail(code: &str, detail: impl std::fmt::Display) -> BridgeError {
+        BridgeError::new(ErrorCode::Internal, code, detail.to_string())
+    }
+    let (Some(asset_url), Some(checksum_url)) = (&info.asset_url, &info.checksum_url) else {
+        return Err(fail(
+            "update.download_failed",
+            "release publishes no verifiable binary",
+        ));
+    };
+    let user_agent = concat!("fadb/", env!("CARGO_PKG_VERSION"));
+    let client = reqwest::Client::builder()
+        // No total timeout: a large binary on a slow link is legitimate. The
+        // connect phase and stalled reads are still bounded, and the user can
+        // always cancel.
+        .connect_timeout(UPDATE_HTTP_TIMEOUT)
+        .read_timeout(UPDATE_HTTP_TIMEOUT)
+        .build()
+        .map_err(|error| fail("update.download_failed", error))?;
+    let mut download = client
+        .get(asset_url)
+        .header(reqwest::header::USER_AGENT, user_agent)
+        .send()
+        .await
+        .and_then(reqwest::Response::error_for_status)
+        .map_err(|error| fail("update.download_failed", error))?;
+    let total = download.content_length().or(info.asset_size);
+    let mut file = tokio::fs::File::create(partial)
+        .await
+        .map_err(|error| fail("update.stage_failed", error))?;
+    let mut hasher = sha2::Sha256::new();
+    let mut received: u64 = 0;
+    let mut last_progress = std::time::Instant::now();
+    loop {
+        if cancel.is_cancelled() {
+            return Err(fail("update.cancelled", "cancelled by user"));
+        }
+        let Some(chunk) = download
+            .chunk()
+            .await
+            .map_err(|error| fail("update.download_failed", error))?
+        else {
+            break;
+        };
+        hasher.update(&chunk);
+        file.write_all(&chunk)
+            .await
+            .map_err(|error| fail("update.stage_failed", error))?;
+        received += chunk.len() as u64;
+        if last_progress.elapsed() >= UPDATE_PROGRESS_INTERVAL {
+            last_progress = std::time::Instant::now();
+            send_event(
+                events,
+                context,
+                BackendEvent::UpdateDownloadProgress { received, total },
+            )
+            .await;
+        }
+    }
+    file.flush()
+        .await
+        .map_err(|error| fail("update.stage_failed", error))?;
+    drop(file);
+
+    // The manifest is fetched after the body so a long download never holds a
+    // second connection open.
+    let manifest = client
+        .get(checksum_url)
+        .header(reqwest::header::USER_AGENT, user_agent)
+        .send()
+        .await
+        .and_then(reqwest::Response::error_for_status)
+        .map_err(|error| fail("update.checksum_failed", error))?
+        .text()
+        .await
+        .map_err(|error| fail("update.checksum_failed", error))?;
+    let expected = parse_checksums(&manifest, asset_url.rsplit('/').next().unwrap_or_default())
+        .ok_or_else(|| {
+            fail(
+                "update.checksum_failed",
+                "manifest has no entry for the downloaded asset",
+            )
+        })?;
+    let actual = hasher
+        .finalize()
+        .iter()
+        .fold(String::with_capacity(64), |mut hex, byte| {
+            let _ = write!(hex, "{byte:02x}");
+            hex
+        });
+    if !actual.eq_ignore_ascii_case(&expected) {
+        return Err(fail(
+            "update.checksum_failed",
+            "downloaded file does not match the published checksum",
+        ));
+    }
+    tokio::fs::rename(partial, staging)
+        .await
+        .map_err(|error| fail("update.stage_failed", error))
 }
 
 #[cfg(test)]
 mod update_check_tests {
-    use super::evaluate_update;
+    use super::{
+        LatestRelease, ReleaseAsset, evaluate_update, parse_checksums, select_update_assets,
+    };
     use fadb_domain::{UpdateCheckOutcome, UpdateInfo};
 
-    fn available(version: &str) -> UpdateCheckOutcome {
-        UpdateCheckOutcome::Available(UpdateInfo {
-            version: version.to_owned(),
-            url: "https://github.com/yeqing17/fadb/releases/tag/v0.9.0".to_owned(),
-        })
+    fn release(tag: &str, assets: Vec<ReleaseAsset>) -> LatestRelease {
+        LatestRelease {
+            tag_name: tag.to_owned(),
+            html_url: format!("https://github.com/yeqing17/fadb/releases/tag/{tag}"),
+            assets,
+        }
+    }
+
+    fn asset(name: &str) -> ReleaseAsset {
+        ReleaseAsset {
+            name: name.to_owned(),
+            size: 1024,
+            browser_download_url: format!(
+                "https://github.com/yeqing17/fadb/releases/download/x/{name}"
+            ),
+        }
+    }
+
+    fn windows_assets() -> Vec<ReleaseAsset> {
+        vec![
+            asset("fadb-desktop-v0.9.0-x86_64-pc-windows-msvc.zip"),
+            asset("fadb-desktop-v0.9.0-x86_64-pc-windows-msvc.exe"),
+            asset("fadb-desktop-v0.9.0-SHA256SUMS.txt"),
+        ]
     }
 
     #[test]
     fn newer_release_is_available_with_or_without_v_prefix() {
+        let outcome = evaluate_update(&release("v0.9.0", windows_assets()), "0.8.8");
+        let UpdateCheckOutcome::Available(info) = &outcome else {
+            panic!("a newer release must be reported as available");
+        };
+        assert_eq!(info.version, "0.9.0");
         assert_eq!(
-            evaluate_update(
-                "v0.9.0",
-                "https://github.com/yeqing17/fadb/releases/tag/v0.9.0",
-                "0.8.8"
-            ),
-            available("0.9.0")
+            info.url,
+            "https://github.com/yeqing17/fadb/releases/tag/v0.9.0"
         );
+        // With no assets at all the advertisement degrades to a bare link on
+        // every platform, so the whole struct is comparable here.
         assert_eq!(
-            evaluate_update("0.9.0", "", "0.8.8"),
+            evaluate_update(&release("0.9.0", Vec::new()), "0.8.8"),
             UpdateCheckOutcome::Available(UpdateInfo {
                 version: "0.9.0".to_owned(),
-                url: String::new(),
+                url: "https://github.com/yeqing17/fadb/releases/tag/0.9.0".to_owned(),
+                asset_url: None,
+                asset_size: None,
+                checksum_url: None,
             })
         );
     }
@@ -2801,11 +3067,11 @@ mod update_check_tests {
     #[test]
     fn equal_or_older_releases_stay_quiet() {
         assert_eq!(
-            evaluate_update("v0.8.8", "", "0.8.8"),
+            evaluate_update(&release("v0.8.8", windows_assets()), "0.8.8"),
             UpdateCheckOutcome::UpToDate
         );
         assert_eq!(
-            evaluate_update("v0.8.7", "", "0.8.8"),
+            evaluate_update(&release("v0.8.7", Vec::new()), "0.8.8"),
             UpdateCheckOutcome::UpToDate
         );
     }
@@ -2813,16 +3079,69 @@ mod update_check_tests {
     #[test]
     fn unparseable_tags_stay_quiet() {
         assert_eq!(
-            evaluate_update("", "", "0.8.8"),
+            evaluate_update(&release("", Vec::new()), "0.8.8"),
             UpdateCheckOutcome::UpToDate
         );
         assert_eq!(
-            evaluate_update("not-a-version", "", "0.8.8"),
+            evaluate_update(&release("not-a-version", Vec::new()), "0.8.8"),
             UpdateCheckOutcome::UpToDate
         );
         assert_eq!(
-            evaluate_update("0.8", "", "0.8.8"),
+            evaluate_update(&release("0.8", Vec::new()), "0.8.8"),
             UpdateCheckOutcome::UpToDate
+        );
+    }
+
+    #[test]
+    fn release_without_a_matching_binary_advertises_link_only() {
+        // The zip never matches the bare-executable suffix, so even on the
+        // platform that publishes exe assets no download may be offered here.
+        let zip_only = vec![asset("fadb-desktop-v0.9.0-x86_64-pc-windows-msvc.zip")];
+        let outcome = evaluate_update(&release("v0.9.0", zip_only), "0.8.8");
+        let UpdateCheckOutcome::Available(info) = outcome else {
+            panic!("a newer release must be reported as available");
+        };
+        assert!(info.asset_url.is_none());
+        assert!(info.checksum_url.is_none());
+        assert_eq!(info.version, "0.9.0");
+    }
+
+    #[test]
+    fn binary_and_checksum_assets_are_selected_by_suffix() {
+        let assets = windows_assets();
+        let (binary, checksum) = select_update_assets(&assets, Some("x86_64-pc-windows-msvc.exe"));
+        assert_eq!(
+            binary.map(|asset| asset.name.as_str()),
+            Some("fadb-desktop-v0.9.0-x86_64-pc-windows-msvc.exe")
+        );
+        assert_eq!(
+            checksum.map(|asset| asset.name.as_str()),
+            Some("fadb-desktop-v0.9.0-SHA256SUMS.txt")
+        );
+        // A platform with no published binary gets nothing at all.
+        let (binary, checksum) = select_update_assets(&assets, None);
+        assert!(binary.is_none() && checksum.is_none());
+    }
+
+    #[test]
+    fn checksum_lookup_is_case_insensitive_and_name_scoped() {
+        let manifest = format!(
+            "{}  fadb-desktop.zip\n{}  fadb-desktop.exe\n",
+            "a".repeat(64),
+            "B".repeat(64),
+        );
+        assert_eq!(
+            parse_checksums(&manifest, "fadb-desktop.exe"),
+            Some("b".repeat(64))
+        );
+        assert_eq!(
+            parse_checksums(&manifest, "fadb-desktop.zip"),
+            Some("a".repeat(64))
+        );
+        assert_eq!(parse_checksums(&manifest, "missing.exe"), None);
+        assert_eq!(
+            parse_checksums("not a checksum line", "fadb-desktop.exe"),
+            None
         );
     }
 }
