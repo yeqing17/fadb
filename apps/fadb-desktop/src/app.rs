@@ -912,7 +912,7 @@ impl FadbApp {
                 ui.separator();
                 ui.add_space(4.0);
 
-                ui.label(egui::RichText::new(text(self.language, "terminal")).strong());
+                ui.label(egui::RichText::new(text(self.language, "shell")).strong());
                 ui.add_space(4.0);
                 egui::Grid::new("settings-terminal")
                     .num_columns(2)
