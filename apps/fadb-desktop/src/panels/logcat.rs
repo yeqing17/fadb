@@ -421,11 +421,13 @@ pub fn show(
                 let color = level_color(state.lines[line_index].level);
                 // One interactive surface per row: the selection tint is
                 // painted under a manually laid out label because `Label`
-                // cannot carry the drag sense row selection needs.
-                let (rect, response) = ui.allocate_exact_size(
-                    egui::vec2(ui.available_width(), ROW_HEIGHT),
-                    egui::Sense::click_and_drag(),
-                );
+                // cannot carry the drag sense row selection needs. The id is
+                // anchored to the buffer line: auto ids would drift by one
+                // every time a line is appended (rows shift up), dropping
+                // keyboard focus before Ctrl+C could use it.
+                let row_id = egui::Id::new("logcat-row").with(line_index);
+                let (_, rect) = ui.allocate_space(egui::vec2(ui.available_width(), ROW_HEIGHT));
+                let response = ui.interact(rect, row_id, egui::Sense::click_and_drag());
                 let painter = ui.painter_at(rect);
                 let selected = selection_span(state.selection)
                     .is_some_and(|(start, end)| start <= line_index && line_index <= end);
@@ -469,6 +471,7 @@ fn handle_row_drag(
     if response.drag_started() {
         state.selection = Some((line_index, line_index));
         state.drag_origin = Some((row, rect.top()));
+        response.request_focus();
     }
     // Drag events are delivered to the row where the drag began; map the
     // pointer's vertical travel back onto row indices, clamped to the window
@@ -501,9 +504,24 @@ fn handle_row_drag(
             ui.ctx().copy_text(text);
         }
     }
-    if response.clicked() {
+    // Triple-click selects the whole line and keeps keyboard focus so the
+    // following Ctrl+C copies it. Plain click still collapses the selection;
+    // it also fires on the third click, hence the `else`.
+    if response.triple_clicked() {
+        state.selection = Some((line_index, line_index));
+        state.drag_origin = None;
+        response.request_focus();
+    } else if response.clicked() {
         state.selection = None;
         state.drag_origin = None;
+    }
+    // Copy the selection on Ctrl/Cmd+C while a row holds focus. A focused
+    // text input (the search box) takes focus away, so its own copy wins.
+    if response.has_focus()
+        && ui.input(|input| input.key_pressed(egui::Key::C) && input.modifiers.command)
+        && let Some(text) = selection_text(state)
+    {
+        ui.ctx().copy_text(text);
     }
 }
 
