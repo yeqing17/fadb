@@ -9,12 +9,12 @@ repository.workspace = true
 
 [dependencies]
 arboard.workspace = true
-fadb-adb = { path = "../../crates/fadb-adb", version = "0.8.13" }
-fadb-ai = { path = "../../crates/fadb-ai", version = "0.8.13" }
-fadb-device = { path = "../../crates/fadb-device", version = "0.8.13" }
-fadb-domain = { path = "../../crates/fadb-domain", version = "0.8.13" }
-fadb-scrcpy = { path = "../../crates/fadb-scrcpy", version = "0.8.13" }
-fadb-test-support = { path = "../../crates/fadb-test-support", version = "0.8.13" }
+fadb-adb = { path = "../../crates/fadb-adb", version = "0.8.14" }
+fadb-ai = { path = "../../crates/fadb-ai", version = "0.8.14" }
+fadb-device = { path = "../../crates/fadb-device", version = "0.8.14" }
+fadb-domain = { path = "../../crates/fadb-domain", version = "0.8.14" }
+fadb-scrcpy = { path = "../../crates/fadb-scrcpy", version = "0.8.14" }
+fadb-test-support = { path = "../../crates/fadb-test-support", version = "0.8.14" }
 eframe.workspace = true
 futures-util.workspace = true
 image.workspace = true
