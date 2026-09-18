@@ -137,6 +137,11 @@ pub struct LogcatPanelState {
     last_start_attempt: Option<Instant>,
     /// Row indices passing the current filters, rebuilt each frame.
     visible: Vec<usize>,
+    /// Selected buffer-line range (anchor, head) — indices into `lines`.
+    selection: Option<(usize, usize)>,
+    /// View index and row top where the active drag began; drag events are
+    /// only delivered to that row, which maps pointer deltas back onto rows.
+    drag_origin: Option<(usize, f32)>,
 }
 
 impl LogcatPanelState {
@@ -160,6 +165,8 @@ impl LogcatPanelState {
         self.running = false;
         self.lines.clear();
         self.pending_bytes.clear();
+        self.selection = None;
+        self.drag_origin = None;
         commands
     }
 
@@ -208,7 +215,9 @@ impl LogcatPanelState {
         }
         self.pending_bytes.extend_from_slice(&bytes[start..]);
         if self.lines.len() > MAX_LINES {
-            self.lines.drain(0..self.lines.len() - MAX_LINES);
+            let remove = self.lines.len() - MAX_LINES;
+            self.lines.drain(0..remove);
+            self.shift_selection_after_trim(remove);
         }
     }
 
@@ -216,7 +225,22 @@ impl LogcatPanelState {
         self.lines.push(line);
         if self.lines.len() > MAX_LINES {
             self.lines.remove(0);
+            self.shift_selection_after_trim(1);
         }
+    }
+
+    /// Selection anchors are buffer indices; when rows fall off the front of
+    /// the ring, a range that touched them is dropped rather than re-anchored.
+    fn shift_selection_after_trim(&mut self, removed: usize) {
+        let Some((anchor, head)) = self.selection.as_mut() else {
+            return;
+        };
+        if *anchor < removed || *head < removed {
+            self.selection = None;
+            return;
+        }
+        *anchor -= removed;
+        *head -= removed;
     }
 }
 
@@ -286,6 +310,25 @@ pub fn show(
         }
         if ui.button(text(language, "logcat_clear")).clicked() {
             state.lines.clear();
+            state.selection = None;
+            state.drag_origin = None;
+        }
+        if ui
+            .add_enabled(
+                !state.lines.is_empty(),
+                egui::Button::new(text(language, "logcat_copy_visible")),
+            )
+            .clicked()
+        {
+            let query = state.query.trim().to_lowercase();
+            let mut body = String::new();
+            for line in &state.lines {
+                if line_passes_filters(line, state.level_filter, &query) {
+                    body.push_str(&line.format());
+                    body.push('\n');
+                }
+            }
+            ui.ctx().copy_text(body);
         }
         if ui.button(text(language, "logcat_save")).clicked()
             && let Some(path) = rfd::FileDialog::new()
@@ -340,16 +383,9 @@ pub fn show(
     let query = state.query.trim().to_lowercase();
     state.visible.clear();
     for (index, line) in state.lines.iter().enumerate() {
-        if !level_passes(state.level_filter, line.severity_index()) {
-            continue;
+        if line_passes_filters(line, state.level_filter, &query) {
+            state.visible.push(index);
         }
-        if !query.is_empty()
-            && !line.tag.to_lowercase().contains(&query)
-            && !line.message.to_lowercase().contains(&query)
-        {
-            continue;
-        }
-        state.visible.push(index);
     }
 
     let total = state.lines.len();
@@ -378,30 +414,174 @@ pub fn show(
         .auto_shrink(false)
         .stick_to_bottom(stick_now)
         .show_rows(ui, ROW_HEIGHT, visible.len(), |ui, range| {
-            for row in range {
-                let line = &state.lines[visible[row]];
-                let color = level_color(line.level);
-                // Not add_sized: it centers on the x axis (centered_and_justified
-                // layout) and short rows would float mid-panel.
-                ui.allocate_ui_with_layout(
+            // `Range` is not `Copy`; iterate a clone so the original window
+            // can still be handed to the pointer handler below.
+            for row in range.clone() {
+                let line_index = visible[row];
+                let color = level_color(state.lines[line_index].level);
+                // One interactive surface per row: the selection tint is
+                // painted under a manually laid out label because `Label`
+                // cannot carry the drag sense row selection needs.
+                let (rect, response) = ui.allocate_exact_size(
                     egui::vec2(ui.available_width(), ROW_HEIGHT),
-                    egui::Layout::left_to_right(egui::Align::Center),
-                    |ui| {
-                        ui.add(
-                            egui::Label::new(
-                                RichText::new(line.format())
-                                    .monospace()
-                                    .size(11.5)
-                                    .color(color),
-                            )
-                            .truncate(),
-                        );
-                    },
+                    egui::Sense::click_and_drag(),
                 );
+                let painter = ui.painter_at(rect);
+                let selected = selection_span(state.selection)
+                    .is_some_and(|(start, end)| start <= line_index && line_index <= end);
+                if selected {
+                    painter.rect_filled(rect, 2.0, ui.visuals().selection.bg_fill);
+                }
+                painter.text(
+                    rect.left_center(),
+                    egui::Align2::LEFT_CENTER,
+                    state.lines[line_index].format(),
+                    egui::FontId::monospace(11.5),
+                    color,
+                );
+                handle_row_drag(ui, state, &response, rect, row, &visible, range.clone());
+                handle_row_menu(language, state, &response, line_index, &visible);
             }
         });
     state.visible = visible;
     commands
+}
+
+/// Drag-select with release-to-copy over the visible window, mirroring the
+/// shell terminal. A plain click collapses the selection again.
+// The row math is safe: indices come from the on-screen window (a few dozen
+// rows at most), and the pointer delta is floored and clamped to that window.
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_possible_wrap
+)]
+fn handle_row_drag(
+    ui: &egui::Ui,
+    state: &mut LogcatPanelState,
+    response: &egui::Response,
+    rect: egui::Rect,
+    row: usize,
+    visible: &[usize],
+    range: std::ops::Range<usize>,
+) {
+    let line_index = visible[row];
+    if response.drag_started() {
+        state.selection = Some((line_index, line_index));
+        state.drag_origin = Some((row, rect.top()));
+    }
+    // Drag events are delivered to the row where the drag began; map the
+    // pointer's vertical travel back onto row indices, clamped to the window
+    // on screen (the terminal has the same viewport-bound selection).
+    if response.dragged()
+        && let Some((origin_row, origin_top)) = state.drag_origin
+        && let Some(pos) = response.interact_pointer_pos()
+        && !range.is_empty()
+    {
+        let delta = ((pos.y - origin_top) / ROW_HEIGHT).round() as isize;
+        let head_row = (origin_row as isize + delta)
+            .clamp(range.start as isize, range.end.saturating_sub(1) as isize)
+            as usize;
+        let head = visible[head_row];
+        match state.selection.as_mut() {
+            Some((_, slot)) => *slot = head,
+            None => state.selection = Some((head, head)),
+        }
+    }
+    if response.drag_stopped() {
+        state.drag_origin = None;
+        // Release-to-copy, but only for a real drag across rows.
+        if let Some((start, end)) = selection_span(state.selection)
+            && start != end
+            && state.lines[start..=end]
+                .iter()
+                .any(|line| !line.message.trim().is_empty())
+            && let Some(text) = selection_text(state)
+        {
+            ui.ctx().copy_text(text);
+        }
+    }
+    if response.clicked() {
+        state.selection = None;
+        state.drag_origin = None;
+    }
+}
+
+/// The right-click clipboard menu: copy the selection (right-clicking a row
+/// outside the current selection re-anchors it there, matching list
+/// conventions) or everything passing the current filters.
+fn handle_row_menu(
+    language: Language,
+    state: &mut LogcatPanelState,
+    response: &egui::Response,
+    line_index: usize,
+    visible: &[usize],
+) {
+    response.context_menu(|ui| {
+        let covers_row = selection_span(state.selection)
+            .is_some_and(|(start, end)| start <= line_index && line_index <= end);
+        if !covers_row {
+            state.selection = Some((line_index, line_index));
+        }
+        if ui
+            .add_enabled(
+                state.selection.is_some(),
+                egui::Button::new(text(language, "logcat_copy_selection")),
+            )
+            .clicked()
+        {
+            if let Some(text) = selection_text(state) {
+                ui.ctx().copy_text(text);
+            }
+            ui.close();
+        }
+        if ui.button(text(language, "logcat_copy_visible")).clicked() {
+            ui.ctx().copy_text(visible_text(state, visible));
+            ui.close();
+        }
+    });
+}
+
+/// Normalizes the (anchor, head) pair into an ordered inclusive span.
+fn selection_span(selection: Option<(usize, usize)>) -> Option<(usize, usize)> {
+    selection.map(|(anchor, head)| {
+        if anchor <= head {
+            (anchor, head)
+        } else {
+            (head, anchor)
+        }
+    })
+}
+
+/// The formatted lines covered by the selection, one per row.
+fn selection_text(state: &LogcatPanelState) -> Option<String> {
+    let (start, end) = selection_span(state.selection)?;
+    let mut body = String::new();
+    for line in &state.lines[start..=end] {
+        body.push_str(&line.format());
+        body.push('\n');
+    }
+    Some(body)
+}
+
+/// The formatted lines passing the current filters, in display order.
+fn visible_text(state: &LogcatPanelState, visible: &[usize]) -> String {
+    let mut body = String::new();
+    for &index in visible {
+        body.push_str(&state.lines[index].format());
+        body.push('\n');
+    }
+    body
+}
+
+/// The shared per-line filter: minimum severity plus the search query.
+fn line_passes_filters(line: &LogLine, level_filter: usize, query: &str) -> bool {
+    if !level_passes(level_filter, line.severity_index()) {
+        return false;
+    }
+    query.is_empty()
+        || line.tag.to_lowercase().contains(query)
+        || line.message.to_lowercase().contains(query)
 }
 
 fn online_and_selected(state: &LogcatPanelState) -> bool {
@@ -520,6 +700,50 @@ mod tests {
         assert!(level_passes(0, None));
         // Unparsed rows only survive the unfiltered view.
         assert!(!level_passes(1, None));
+    }
+
+    #[test]
+    fn selection_span_orders_anchor_and_head() {
+        assert_eq!(selection_span(None), None);
+        assert_eq!(selection_span(Some((4, 2))), Some((2, 4)));
+        assert_eq!(selection_span(Some((3, 3))), Some((3, 3)));
+    }
+
+    #[test]
+    fn selection_text_joins_formatted_rows() {
+        let mut state = LogcatPanelState::default();
+        state
+            .lines
+            .push(LogLine::parse("08-29 10:00:00.000 1 1 I A: one"));
+        state.lines.push(LogLine::parse("junk"));
+        state.selection = Some((1, 0));
+        assert_eq!(
+            selection_text(&state).as_deref(),
+            Some("08-29 10:00:00.000 I/A 1: one\njunk\n")
+        );
+        state.selection = None;
+        assert!(selection_text(&state).is_none());
+    }
+
+    #[test]
+    fn trimming_the_ring_drops_selections_touching_the_front() {
+        let mut state = LogcatPanelState::default();
+        state.selection = Some((5, 7));
+        state.shift_selection_after_trim(2);
+        assert_eq!(state.selection, Some((3, 5)));
+        state.shift_selection_after_trim(5);
+        assert_eq!(state.selection, None);
+    }
+
+    #[test]
+    fn line_filter_combines_level_and_query() {
+        let line = LogLine::parse("08-29 10:00:00.000 1 1 W Tag: boom");
+        assert!(line_passes_filters(&line, 4, ""));
+        assert!(!line_passes_filters(&line, 5, ""));
+        assert!(line_passes_filters(&line, 4, "boo"));
+        assert!(!line_passes_filters(&line, 4, "nope"));
+        assert!(line_passes_filters(&LogLine::parse("junk"), 0, ""));
+        assert!(!line_passes_filters(&LogLine::parse("junk"), 1, ""));
     }
 
     #[test]

@@ -112,6 +112,22 @@ impl ShellPanelState {
         commands
     }
 
+    /// Opens a session on the selected device with no extra click. Fires
+    /// only from the pristine `Disconnected` state: an explicit disconnect
+    /// (`Exited`) or a failed attempt (`Failed`) is never fought by a
+    /// reconnect loop. Call after [`Self::reconcile_target`] so the target
+    /// tracks the current selection.
+    pub fn auto_connect(&mut self, selected: Option<&DeviceRecord>) -> Option<BackendCommand> {
+        if self.status != ShellStatus::Disconnected {
+            return None;
+        }
+        let online = selected.is_some_and(|record| record.descriptor.state.is_online());
+        if !online {
+            return None;
+        }
+        self.connect()
+    }
+
     /// The selection in reading order, or `None` when empty or collapsed.
     fn ordered_selection(&self) -> Option<(TerminalCell, TerminalCell)> {
         let (anchor, head) = self.selection?;
@@ -782,6 +798,40 @@ mod tests {
         let mut state = ShellPanelState::default();
         state.parser.process(bytes);
         state
+    }
+
+    fn online_record() -> DeviceRecord {
+        DeviceRecord {
+            descriptor: fadb_domain::DeviceDescriptor {
+                serial: fadb_domain::DeviceSerial::new("emulator-5554").expect("valid serial"),
+                state: fadb_domain::DeviceState::Online,
+                product: None,
+                model: None,
+                device: None,
+                transport_id: None,
+            },
+            generation: 1,
+        }
+    }
+
+    #[test]
+    fn auto_connect_fires_only_from_pristine_state_with_online_device() {
+        let mut state = ShellPanelState::default();
+        let record = online_record();
+        // Nothing selected yet: the session has no target to open on.
+        assert!(state.auto_connect(Some(&record)).is_none());
+        // After the target reconciles, the pristine state connects once.
+        state.reconcile_target(Some(&record));
+        let command = state.auto_connect(Some(&record)).expect("auto connect");
+        assert!(matches!(command, BackendCommand::OpenShell { .. }));
+        // Connecting or connected: no duplicate session.
+        assert!(state.auto_connect(Some(&record)).is_none());
+        // A device that is not online is never auto-connected.
+        let mut state = ShellPanelState::default();
+        state.reconcile_target(Some(&record));
+        let mut offline = online_record();
+        offline.descriptor.state = fadb_domain::DeviceState::Unauthorized;
+        assert!(state.auto_connect(Some(&offline)).is_none());
     }
 
     #[test]

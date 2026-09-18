@@ -37,6 +37,8 @@ const NAVIGATION_WIDTH: f32 = 125.0;
 const COLLAPSED_NAVIGATION_WIDTH: f32 = 40.0;
 /// Storage key remembering whether the navigation rail is collapsed.
 const NAVIGATION_COLLAPSED_STORAGE_KEY: &str = "fadb.navigation_collapsed";
+/// Storage key for the terminal's connect-on-open toggle (default on).
+const TERMINAL_AUTO_CONNECT_STORAGE_KEY: &str = "fadb.terminal_auto_connect";
 /// Storage key for update-check preferences (auto flag + last success).
 const UPDATE_CHECK_STORAGE_KEY: &str = "fadb.update_check";
 /// Minimum interval between *automatic* update checks; the settings button
@@ -51,6 +53,10 @@ const TOP_BAR_MARGIN_X: i8 = 12;
 /// as the device allows (each sample shells out several times), so this is
 /// an upper bound on the rate, not a promise.
 const PERFORMANCE_POLL_MILLIS: u64 = 500;
+/// How long a connect's auto-select stays armed. Normally the device list
+/// shows the endpoint within a second of `AdbConnected`; the bound only
+/// keeps a stale marker from stealing a much later selection.
+const PENDING_SELECT_TTL: Duration = Duration::from_secs(15);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Panel {
@@ -209,6 +215,9 @@ pub struct FadbApp {
     logo_hover_started: Option<std::time::Instant>,
     /// Whether the left navigation rail is collapsed to icons only.
     navigation_collapsed: bool,
+    /// Whether switching to the terminal panel connects the selected device
+    /// automatically (persisted, default on).
+    terminal_auto_connect: bool,
     ai_form: assistant::AiSettingsForm,
     files: files::FilesPanelState,
     applications: applications::ApplicationsPanelState,
@@ -235,6 +244,11 @@ pub struct FadbApp {
     endpoint_host: String,
     endpoint_port: String,
     connecting_endpoint: Option<AdbEndpoint>,
+    /// Set when the user asks for a connect: the endpoint's adb target is
+    /// auto-selected as soon as a device list shows it online, so a fresh
+    /// connect needs no separate 选择 click. Expires after
+    /// [`PENDING_SELECT_TTL`].
+    pending_select: Option<(String, Instant)>,
     last_error: Option<BridgeError>,
     /// Update-check state surfaced in the settings window's about section.
     update_state: UpdateState,
@@ -274,6 +288,11 @@ impl FadbApp {
                 .storage
                 .and_then(|storage| storage.get_string(NAVIGATION_COLLAPSED_STORAGE_KEY))
                 .is_some_and(|stored| stored == "1"),
+            // Absent key means the default: auto-connect on.
+            terminal_auto_connect: creation_context
+                .storage
+                .and_then(|storage| storage.get_string(TERMINAL_AUTO_CONNECT_STORAGE_KEY))
+                .is_none_or(|stored| stored == "1"),
             ai_form: assistant::AiSettingsForm::from_settings(stored_ai.as_ref()),
             files: files::FilesPanelState::default(),
             applications: applications::ApplicationsPanelState::default(),
@@ -297,6 +316,7 @@ impl FadbApp {
             endpoint_host: String::new(),
             endpoint_port: "5555".to_owned(),
             connecting_endpoint: None,
+            pending_select: None,
             last_error: None,
             update_state: UpdateState::load(creation_context.storage),
             launched_at: Instant::now(),
@@ -403,6 +423,7 @@ impl FadbApp {
                 }
                 BackendEvent::AdbConnectFailed { endpoint, error } => {
                     self.connecting_endpoint = None;
+                    self.pending_select = None;
                     self.last_error = Some(BridgeError::new(
                         error.code,
                         error.message_key,
@@ -477,6 +498,22 @@ impl FadbApp {
                 BackendEvent::DevicesChanged(snapshot) => {
                     if snapshot.selected != self.snapshot.selected {
                         self.overview = None;
+                    }
+                    // A connect the user just asked for selects itself: the
+                    // first device list that shows the endpoint online claims
+                    // the selection, no separate 选择 click needed.
+                    let pending = self
+                        .pending_select
+                        .as_ref()
+                        .map(|(target, born)| (target.as_str(), born.elapsed()));
+                    if let Some(target) = pending_select_target(pending, &snapshot) {
+                        self.pending_select = None;
+                        if self.snapshot.selected.as_ref() != Some(target) {
+                            let serial = target.clone();
+                            self.snapshot = snapshot;
+                            self.send(BackendCommand::SelectDevice(Some(serial)));
+                            continue;
+                        }
                     }
                     let auto_select = self.auto_select_requested
                         && self.snapshot.selected.is_none()
@@ -755,6 +792,7 @@ impl FadbApp {
         endpoint.host().clone_into(&mut self.endpoint_host);
         self.endpoint_port = endpoint.port().to_string();
         self.connecting_endpoint = Some(endpoint.clone());
+        self.pending_select = Some((endpoint.to_string(), Instant::now()));
         self.send(BackendCommand::ConnectDevice(endpoint));
     }
 
@@ -870,6 +908,21 @@ impl FadbApp {
                 ui.label(egui::RichText::new("ADB").strong());
                 ui.add_space(4.0);
                 self.settings_adb_grid(ui);
+                ui.add_space(8.0);
+                ui.separator();
+                ui.add_space(4.0);
+
+                ui.label(egui::RichText::new(text(self.language, "terminal")).strong());
+                ui.add_space(4.0);
+                egui::Grid::new("settings-terminal")
+                    .num_columns(2)
+                    .min_col_width(80.0)
+                    .spacing([24.0, 6.0])
+                    .show(ui, |ui| {
+                        ui.label(text(self.language, "settings.auto_connect_terminal"));
+                        ui.checkbox(&mut self.terminal_auto_connect, "");
+                        ui.end_row();
+                    });
                 ui.add_space(8.0);
                 ui.separator();
                 ui.add_space(4.0);
@@ -1374,13 +1427,24 @@ impl FadbApp {
                         }
                         Vec::new()
                     }
-                    Panel::Shell => shell::show(
-                        ui,
-                        context,
-                        self.language,
-                        selected.as_ref(),
-                        &mut self.shell,
-                    ),
+                    Panel::Shell => {
+                        let mut commands = shell::show(
+                            ui,
+                            context,
+                            self.language,
+                            selected.as_ref(),
+                            &mut self.shell,
+                        );
+                        // The connect-on-open toggle lives in the settings
+                        // window; most sessions are a single device, so the
+                        // extra click buys nothing.
+                        if self.terminal_auto_connect
+                            && let Some(command) = self.shell.auto_connect(selected.as_ref())
+                        {
+                            commands.push(command);
+                        }
+                        commands
+                    }
                     Panel::Screenshot => {
                         screenshot::show(ui, self.language, selected.as_ref(), &mut self.screenshot)
                     }
@@ -1813,6 +1877,14 @@ impl eframe::App for FadbApp {
                 "0".to_owned()
             },
         );
+        storage.set_string(
+            TERMINAL_AUTO_CONNECT_STORAGE_KEY,
+            if self.terminal_auto_connect {
+                "1".to_owned()
+            } else {
+                "0".to_owned()
+            },
+        );
         if let Ok(serialized) = serde_json::to_string(&self.recent_endpoints) {
             storage.set_string(RECENT_ENDPOINTS_STORAGE_KEY, serialized);
         }
@@ -2131,6 +2203,27 @@ fn seam_cursor(direction: egui::ResizeDirection) -> egui::CursorIcon {
     }
 }
 
+/// The serial to auto-select for a connect the user just asked for, if the
+/// fresh snapshot shows that endpoint's device online. `pending` carries the
+/// adb target plus the marker's age; expired or unlisted endpoints select
+/// nothing (the marker is cleared by the caller either way).
+fn pending_select_target<'a>(
+    pending: Option<(&str, Duration)>,
+    snapshot: &'a DeviceSnapshot,
+) -> Option<&'a fadb_domain::DeviceSerial> {
+    let (target, age) = pending?;
+    if age >= PENDING_SELECT_TTL {
+        return None;
+    }
+    snapshot
+        .devices
+        .iter()
+        .find(|record| {
+            record.descriptor.serial.as_str() == target && record.descriptor.state.is_online()
+        })
+        .map(|record| &record.descriptor.serial)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2141,6 +2234,62 @@ mod tests {
         assert_eq!(Panel::ALL[0], Panel::Overview);
         assert_eq!(Panel::ALL[9], Panel::WebView);
         assert_eq!(Panel::ALL[10], Panel::Mirror);
+    }
+
+    /// One online record for `serial`, ready for snapshot construction.
+    fn online_record(serial: &str) -> DeviceRecord {
+        DeviceRecord {
+            descriptor: fadb_domain::DeviceDescriptor {
+                serial: fadb_domain::DeviceSerial::new(serial).expect("valid serial"),
+                state: fadb_domain::DeviceState::Online,
+                product: None,
+                model: None,
+                device: None,
+                transport_id: None,
+            },
+            generation: 1,
+        }
+    }
+
+    #[test]
+    fn pending_select_targets_the_connected_endpoint_once_online() {
+        let snapshot = DeviceSnapshot {
+            devices: vec![
+                online_record("emulator-5554"),
+                online_record("10.240.16.196:5555"),
+            ],
+            selected: None,
+        };
+        let target = pending_select_target(
+            Some(("10.240.16.196:5555", Duration::from_secs(1))),
+            &snapshot,
+        );
+        assert_eq!(
+            target.map(fadb_domain::DeviceSerial::as_str),
+            Some("10.240.16.196:5555")
+        );
+    }
+
+    #[test]
+    fn pending_select_ignores_offline_unlisted_and_expired() {
+        let mut snapshot = DeviceSnapshot {
+            devices: vec![online_record("10.240.16.196:5555")],
+            selected: None,
+        };
+        // Still authorizing: nothing to select yet.
+        snapshot.devices[0].descriptor.state = fadb_domain::DeviceState::Unauthorized;
+        assert_eq!(
+            pending_select_target(Some(("10.240.16.196:5555", Duration::ZERO)), &snapshot),
+            None
+        );
+        // Expired marker selects nothing even with the device online.
+        snapshot.devices[0].descriptor.state = fadb_domain::DeviceState::Online;
+        assert_eq!(
+            pending_select_target(Some(("10.240.16.196:5555", PENDING_SELECT_TTL)), &snapshot),
+            None
+        );
+        // No pending marker at all.
+        assert_eq!(pending_select_target(None, &snapshot), None);
     }
 
     #[test]
