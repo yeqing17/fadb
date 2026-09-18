@@ -542,8 +542,10 @@ mod tests {
 
     #[test]
     fn sending_long_input_archives_txt_and_keeps_full_prompt() {
-        let mut state = AssistantPanelState::default();
-        state.ready = true;
+        let mut state = AssistantPanelState {
+            ready: true,
+            ..Default::default()
+        };
         let long_text = vec!["log line"; LONG_INPUT_LINES].join("\n");
         state.input = long_text.clone();
         let BackendCommand::SendAiChat { prompt, .. } = state.send().expect("send") else {
@@ -565,9 +567,11 @@ mod tests {
 
     #[test]
     fn short_input_sends_without_attachment() {
-        let mut state = AssistantPanelState::default();
-        state.ready = true;
-        state.input = "hello".to_owned();
+        let mut state = AssistantPanelState {
+            ready: true,
+            input: "hello".to_owned(),
+            ..Default::default()
+        };
         let _ = state.send().expect("send");
         assert!(state.turns.last().expect("user turn").attachment.is_none());
     }

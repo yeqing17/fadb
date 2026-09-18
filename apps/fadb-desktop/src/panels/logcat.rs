@@ -727,8 +727,10 @@ mod tests {
 
     #[test]
     fn trimming_the_ring_drops_selections_touching_the_front() {
-        let mut state = LogcatPanelState::default();
-        state.selection = Some((5, 7));
+        let mut state = LogcatPanelState {
+            selection: Some((5, 7)),
+            ..Default::default()
+        };
         state.shift_selection_after_trim(2);
         assert_eq!(state.selection, Some((3, 5)));
         state.shift_selection_after_trim(5);
