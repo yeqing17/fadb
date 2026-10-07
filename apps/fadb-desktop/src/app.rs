@@ -39,6 +39,8 @@ const COLLAPSED_NAVIGATION_WIDTH: f32 = 40.0;
 const NAVIGATION_COLLAPSED_STORAGE_KEY: &str = "fadb.navigation_collapsed";
 /// Storage key for the terminal's connect-on-open toggle (default on).
 const TERMINAL_AUTO_CONNECT_STORAGE_KEY: &str = "fadb.terminal_auto_connect";
+/// Storage key for the files panel's size column unit (default MB).
+const FILE_SIZE_UNIT_STORAGE_KEY: &str = "fadb.file_size_unit";
 /// Storage key for update-check preferences (auto flag + last success).
 const UPDATE_CHECK_STORAGE_KEY: &str = "fadb.update_check";
 /// Minimum interval between *automatic* update checks; the settings button
@@ -218,6 +220,8 @@ pub struct FadbApp {
     /// Whether switching to the terminal panel connects the selected device
     /// automatically (persisted, default on).
     terminal_auto_connect: bool,
+    /// Unit the files panel's size column renders in (persisted, default MB).
+    file_size_unit: files::FileSizeUnit,
     ai_form: assistant::AiSettingsForm,
     files: files::FilesPanelState,
     applications: applications::ApplicationsPanelState,
@@ -267,6 +271,7 @@ pub struct FadbApp {
 }
 
 impl FadbApp {
+    #[allow(clippy::too_many_lines)]
     pub fn new(creation_context: &eframe::CreationContext<'_>) -> Self {
         theme::configure(&creation_context.egui_ctx);
         platform::apply_window_chrome(creation_context);
@@ -293,6 +298,11 @@ impl FadbApp {
                 .storage
                 .and_then(|storage| storage.get_string(TERMINAL_AUTO_CONNECT_STORAGE_KEY))
                 .is_none_or(|stored| stored == "1"),
+            file_size_unit: creation_context
+                .storage
+                .and_then(|storage| storage.get_string(FILE_SIZE_UNIT_STORAGE_KEY))
+                .and_then(|stored| files::FileSizeUnit::from_symbol(&stored))
+                .unwrap_or_default(),
             ai_form: assistant::AiSettingsForm::from_settings(stored_ai.as_ref()),
             files: files::FilesPanelState::default(),
             applications: applications::ApplicationsPanelState::default(),
@@ -847,6 +857,7 @@ impl FadbApp {
 
     /// The settings window: grouped rows for appearance, ADB info and about,
     /// opened from the gear button in the top bar.
+    #[allow(clippy::too_many_lines)]
     fn settings_window(&mut self, context: &egui::Context) {
         let mut open = self.windows.settings;
         egui::Window::new(text(self.language, "settings"))
@@ -921,6 +932,31 @@ impl FadbApp {
                     .show(ui, |ui| {
                         ui.label(text(self.language, "settings.auto_connect_terminal"));
                         ui.checkbox(&mut self.terminal_auto_connect, "");
+                        ui.end_row();
+                    });
+                ui.add_space(8.0);
+                ui.separator();
+                ui.add_space(4.0);
+
+                ui.label(egui::RichText::new(text(self.language, "files")).strong());
+                ui.add_space(4.0);
+                egui::Grid::new("settings-files")
+                    .num_columns(2)
+                    .min_col_width(80.0)
+                    .spacing([24.0, 6.0])
+                    .show(ui, |ui| {
+                        ui.label(text(self.language, "settings.file_size_unit"));
+                        egui::ComboBox::from_id_salt("settings-file-size-unit")
+                            .selected_text(self.file_size_unit.symbol())
+                            .show_ui(ui, |ui| {
+                                for unit in files::FileSizeUnit::ALL {
+                                    ui.selectable_value(
+                                        &mut self.file_size_unit,
+                                        unit,
+                                        unit.symbol(),
+                                    );
+                                }
+                            });
                         ui.end_row();
                     });
                 ui.add_space(8.0);
@@ -1452,6 +1488,7 @@ impl FadbApp {
                         ui,
                         self.language,
                         &mut self.files,
+                        self.file_size_unit,
                         selected.as_ref().map(DeviceRecord::target).as_ref(),
                     ),
                     Panel::Applications => {
@@ -1884,6 +1921,10 @@ impl eframe::App for FadbApp {
             } else {
                 "0".to_owned()
             },
+        );
+        storage.set_string(
+            FILE_SIZE_UNIT_STORAGE_KEY,
+            self.file_size_unit.symbol().to_owned(),
         );
         if let Ok(serialized) = serde_json::to_string(&self.recent_endpoints) {
             storage.set_string(RECENT_ENDPOINTS_STORAGE_KEY, serialized);

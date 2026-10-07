@@ -79,6 +79,7 @@ pub fn text(language: Language, key: &str) -> &'static str {
         (Language::Chinese, "settings.check_updates") => "检查更新",
         (Language::Chinese, "settings.auto_check_updates") => "启动时自动检查更新",
         (Language::Chinese, "settings.auto_connect_terminal") => "打开终端时自动连接当前设备",
+        (Language::Chinese, "settings.file_size_unit") => "文件大小单位",
         (Language::Chinese, "update.checking") => "正在检查更新…",
         (Language::Chinese, "update.up_to_date") => "已是最新版本",
         (Language::Chinese, "update.available") => "发现新版本",
@@ -544,6 +545,7 @@ pub fn text(language: Language, key: &str) -> &'static str {
         (_, "settings.auto_connect_terminal") => {
             "Connect the current device when the terminal opens"
         }
+        (_, "settings.file_size_unit") => "File size unit",
         (_, "update.checking") => "Checking for updates…",
         (_, "update.up_to_date") => "Fadb is up to date",
         (_, "update.available") => "New version available",
@@ -998,6 +1000,7 @@ mod tests {
         "settings.check_updates",
         "settings.auto_check_updates",
         "settings.auto_connect_terminal",
+        "settings.file_size_unit",
         "update.checking",
         "update.up_to_date",
         "update.available",

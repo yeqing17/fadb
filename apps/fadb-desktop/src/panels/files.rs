@@ -38,6 +38,57 @@ enum SortKey {
     Modified,
 }
 
+/// Unit the files panel renders `size_bytes` in; user-selected in the
+/// settings window and persisted across restarts.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum FileSizeUnit {
+    Bytes,
+    Kilobytes,
+    #[default]
+    Megabytes,
+    Gigabytes,
+}
+
+impl FileSizeUnit {
+    pub const ALL: [Self; 4] = [
+        Self::Bytes,
+        Self::Kilobytes,
+        Self::Megabytes,
+        Self::Gigabytes,
+    ];
+
+    /// Storage / settings representation; also the ComboBox label (unit
+    /// symbols read the same in both languages).
+    pub const fn symbol(self) -> &'static str {
+        match self {
+            Self::Bytes => "B",
+            Self::Kilobytes => "KB",
+            Self::Megabytes => "MB",
+            Self::Gigabytes => "GB",
+        }
+    }
+
+    pub fn from_symbol(symbol: &str) -> Option<Self> {
+        Self::ALL
+            .iter()
+            .copied()
+            .find(|unit| unit.symbol() == symbol)
+    }
+}
+
+/// Fixed-unit size rendering: the value is always divided down to the
+/// chosen unit (1024-based) instead of auto-scaling, so a column stays
+/// comparable row to row.
+#[allow(clippy::cast_precision_loss)] // file sizes are far below f64's 2^53 exact range
+fn format_size(size: u64, unit: FileSizeUnit) -> String {
+    match unit {
+        FileSizeUnit::Bytes => format!("{size} B"),
+        FileSizeUnit::Kilobytes => format!("{:.1} KB", size as f64 / 1_024.0),
+        FileSizeUnit::Megabytes => format!("{:.1} MB", size as f64 / 1_048_576.0),
+        FileSizeUnit::Gigabytes => format!("{:.1} GB", size as f64 / 1_073_741_824.0),
+    }
+}
+
 fn sort_header(
     ui: &mut egui::Ui,
     language: Language,
@@ -345,6 +396,7 @@ pub fn show(
     ui: &mut egui::Ui,
     language: Language,
     state: &mut FilesPanelState,
+    size_unit: FileSizeUnit,
     target: Option<&DeviceTarget>,
 ) -> Vec<BackendCommand> {
     let mut commands = Vec::new();
@@ -497,7 +549,7 @@ pub fn show(
                     ui.label(
                         entry
                             .size_bytes
-                            .map_or("—".to_owned(), |size| size.to_string()),
+                            .map_or("—".to_owned(), |size| format_size(size, size_unit)),
                     );
                     ui.label(
                         entry
@@ -803,5 +855,23 @@ mod tests {
     #[test]
     fn formats_known_timestamp() {
         assert_eq!(format_modified_time(1_700_000_000), "2023-11-14 22:13");
+    }
+
+    #[test]
+    fn formats_size_in_fixed_units() {
+        let size = 5 * 1_048_576 + 300 * 1_024;
+        assert_eq!(format_size(512, FileSizeUnit::Bytes), "512 B");
+        assert_eq!(format_size(512, FileSizeUnit::Kilobytes), "0.5 KB");
+        assert_eq!(format_size(size, FileSizeUnit::Megabytes), "5.3 MB");
+        assert_eq!(format_size(0, FileSizeUnit::Gigabytes), "0.0 GB");
+    }
+
+    #[test]
+    fn unit_symbols_round_trip() {
+        assert_eq!(FileSizeUnit::default(), FileSizeUnit::Megabytes);
+        for unit in FileSizeUnit::ALL {
+            assert_eq!(FileSizeUnit::from_symbol(unit.symbol()), Some(unit));
+        }
+        assert_eq!(FileSizeUnit::from_symbol("TiB"), None);
     }
 }
