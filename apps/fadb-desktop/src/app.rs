@@ -8,6 +8,7 @@ use fadb_domain::{
 };
 
 use crate::{
+    DEFAULT_WINDOW_SIZE, MIN_WINDOW_SIZE,
     i18n::{Language, adb_download_url, error_hint, error_title, text},
     panels::{
         applications, assistant, files, layout, logcat, mirror, overview, performance, processes,
@@ -1868,6 +1869,7 @@ impl FadbApp {
 
 impl eframe::App for FadbApp {
     fn update(&mut self, context: &egui::Context, _frame: &mut eframe::Frame) {
+        heal_window_size(context);
         self.process_events();
         self.maybe_auto_check_update();
         self.handle_apk_drop(context);
@@ -2003,6 +2005,28 @@ fn load_ai_settings(storage: Option<&dyn eframe::Storage>) -> Option<AiSettings>
 /// resize loop exits, winit posts a synthetic button-up that egui may see one
 /// frame late, and an unconditional re-send would immediately re-enter the
 /// resize loop with the button already released (the "stuck resizing" bug).
+/// Self-heal a degenerate window rectangle restored from persisted state.
+///
+/// eframe replays the persisted window size on startup, bypassing the
+/// builder's minimum size: exiting while the window was minimized once saved
+/// a 157x64 rectangle that then restored on every launch, showing the app as
+/// an unusable sliver. Anything below our own minimum is replaced with the
+/// default; sane restored sizes (>= min) are left untouched. Minimized
+/// windows report a degenerate inner rect by nature, so they are skipped.
+fn heal_window_size(context: &egui::Context) {
+    let info = context.input(|input| input.viewport().clone());
+    if info.minimized == Some(true) {
+        return;
+    }
+    let Some(rect) = info.inner_rect else {
+        return;
+    };
+    let size = rect.size();
+    if size.x < MIN_WINDOW_SIZE.x || size.y < MIN_WINDOW_SIZE.y {
+        context.send_viewport_cmd(egui::ViewportCommand::InnerSize(DEFAULT_WINDOW_SIZE));
+    }
+}
+
 fn handle_window_resize(context: &egui::Context, resize_sent: &mut bool) {
     let Some(direction) = seam_direction(context) else {
         return;

@@ -13,6 +13,12 @@ use app::FadbApp;
 use eframe::egui;
 use tracing_subscriber::EnvFilter;
 
+/// Size the window opens at, also the recovery target when persisted state
+/// carries a degenerate window rectangle (see `heal_window_size`).
+pub const DEFAULT_WINDOW_SIZE: egui::Vec2 = egui::vec2(1180.0, 760.0);
+/// Smallest window size the seam-drag resize allows.
+pub const MIN_WINDOW_SIZE: egui::Vec2 = egui::vec2(900.0, 600.0);
+
 fn main() -> eframe::Result<()> {
     // Leftover from a previous in-app update swap: the previous binary is
     // kept as `.old` only so the running exe can be renamed over; once we are
@@ -36,8 +42,8 @@ fn main() -> eframe::Result<()> {
             .with_title("Fadb")
             .with_icon(app_icon())
             .with_decorations(false)
-            .with_inner_size([1180.0, 760.0])
-            .with_min_inner_size([900.0, 600.0]),
+            .with_inner_size([DEFAULT_WINDOW_SIZE.x, DEFAULT_WINDOW_SIZE.y])
+            .with_min_inner_size([MIN_WINDOW_SIZE.x, MIN_WINDOW_SIZE.y]),
         ..Default::default()
     };
 
