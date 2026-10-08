@@ -30,12 +30,12 @@ struct MutationModal {
     entry: Option<RemoteFileEntry>,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 enum SortKey {
-    #[default]
     Name,
-    Size,
+    #[default]
     Modified,
+    Size,
 }
 
 /// Unit the files panel renders `size_bytes` in; user-selected in the
@@ -96,9 +96,11 @@ fn sort_header(
     key: SortKey,
     label: &str,
 ) {
+    // reverse=true flips the comparison to descending, so the arrow points
+    // down for "large/new first" and up for the natural ascending order.
     let arrow = match (state.sort_key == key, state.sort_reverse) {
-        (true, false) => " ▼",
-        (true, true) => " ▲",
+        (true, false) => " ▲",
+        (true, true) => " ▼",
         (false, _) => "",
     };
     if ui
@@ -114,17 +116,24 @@ fn sort_header(
     }
 }
 
-#[derive(Default)]
 pub struct FilesPanelState {
     target: Option<DeviceTarget>,
     directory: Option<RemotePath>,
     path_input: String,
     entries: Vec<RemoteFileEntry>,
-    selected: Option<usize>,
+    /// Selected entry, tracked by path: an index would silently point at a
+    /// different row once sorting or the name filter changes.
+    selected: Option<RemotePath>,
     history: Vec<RemotePath>,
+    /// Case-insensitive name filter; cleared when navigating so a stale
+    /// filter never makes a freshly loaded directory look empty.
+    filter: String,
     sort_key: SortKey,
     sort_reverse: bool,
     listing_request: Option<OperationId>,
+    /// Set once the automatic `/{sdcard,}` bootstrap listing failed and the
+    /// panel fell back to `/`, so devices without `/sdcard` still show files.
+    root_fallback_attempted: bool,
     loading: bool,
     transfer: Option<OperationId>,
     transfer_intent: Option<TransferIntent>,
@@ -132,6 +141,33 @@ pub struct FilesPanelState {
     mutation: Option<OperationId>,
     mutation_modal: Option<MutationModal>,
     error: Option<String>,
+}
+
+impl Default for FilesPanelState {
+    fn default() -> Self {
+        Self {
+            target: None,
+            directory: None,
+            path_input: String::new(),
+            entries: Vec::new(),
+            selected: None,
+            history: Vec::new(),
+            filter: String::new(),
+            // Fresh listings read newest-changes-first: the folder you just
+            // touched is the one you came to look for.
+            sort_key: SortKey::Modified,
+            sort_reverse: true,
+            listing_request: None,
+            root_fallback_attempted: false,
+            loading: false,
+            transfer: None,
+            transfer_intent: None,
+            overwrite_prompt: None,
+            mutation: None,
+            mutation_modal: None,
+            error: None,
+        }
+    }
 }
 
 impl FilesPanelState {
@@ -145,7 +181,9 @@ impl FilesPanelState {
         self.entries.clear();
         self.selected = None;
         self.history.clear();
+        self.filter.clear();
         self.listing_request = None;
+        self.root_fallback_attempted = false;
         self.loading = false;
         self.transfer = None;
         self.transfer_intent = None;
@@ -197,13 +235,22 @@ impl FilesPanelState {
             BackendEvent::DirectoryFailed {
                 request_id,
                 target,
+                path,
                 error,
-                ..
             } if self.listing_request.as_ref() == Some(request_id)
                 && self.target.as_ref() == Some(target) =>
             {
                 self.loading = false;
                 self.error = Some(format_error(language, error));
+                // Devices without /sdcard (some TVs and boxes) would show a
+                // permanently blank panel; retry once at the root instead.
+                if !self.root_fallback_attempted
+                    && path.as_str() == "/sdcard"
+                    && let Some(target) = self.target.clone()
+                {
+                    self.root_fallback_attempted = true;
+                    commands.push(self.list(target, RemotePath::new("/").expect("valid path")));
+                }
             }
             BackendEvent::FileTransferStarted {
                 request_id, target, ..
@@ -288,6 +335,15 @@ impl FilesPanelState {
     }
 
     fn list(&mut self, target: DeviceTarget, path: RemotePath) -> BackendCommand {
+        // Navigating to a different directory must not keep showing the
+        // previous directory's rows: they would linger through the load and,
+        // if the new listing fails, sit under the new path forever. Refreshes
+        // of the same directory keep the old rows until the fresh ones arrive.
+        if self.directory.as_ref() != Some(&path) {
+            self.entries.clear();
+            self.filter.clear();
+        }
+        self.selected = None;
         let request_id = OperationId::new();
         self.listing_request = Some(request_id);
         self.loading = true;
@@ -338,7 +394,8 @@ impl FilesPanelState {
     }
 
     fn selected_entry(&self) -> Option<&RemoteFileEntry> {
-        self.selected.and_then(|index| self.entries.get(index))
+        let selected = self.selected.as_ref()?;
+        self.entries.iter().find(|entry| &entry.path == selected)
     }
 }
 
@@ -346,18 +403,33 @@ fn format_error(language: Language, error: &BridgeError) -> String {
     error_text(language, error)
 }
 
+/// Entries the user can browse into like a folder: plain directories and
+/// symlinks that resolve to a directory (`/sdcard`, `/etc`, ...).
+fn is_directory_like(entry: &RemoteFileEntry) -> bool {
+    entry.kind == RemoteFileKind::Directory
+        || (entry.kind == RemoteFileKind::Symlink
+            && entry.target_kind == Some(RemoteFileKind::Directory))
+}
+
 fn sort_entries(entries: &mut [RemoteFileEntry], key: SortKey, reverse: bool) {
     entries.sort_by(|left, right| {
+        // Folders always group first, like every desktop file manager; the
+        // default view would otherwise interleave files among them. The
+        // direction only flips the order inside the groups.
         let ordering = match key {
             SortKey::Name => left.name.to_lowercase().cmp(&right.name.to_lowercase()),
             SortKey::Size => left.size_bytes.cmp(&right.size_bytes),
             SortKey::Modified => left.modified_unix_seconds.cmp(&right.modified_unix_seconds),
         };
-        if reverse {
-            ordering.reverse()
-        } else {
-            ordering
-        }
+        u8::from(!is_directory_like(left))
+            .cmp(&u8::from(!is_directory_like(right)))
+            .then_with(|| {
+                if reverse {
+                    ordering.reverse()
+                } else {
+                    ordering
+                }
+            })
     });
 }
 
@@ -385,10 +457,100 @@ fn format_modified_time(unix_seconds: i64) -> String {
     let seconds_of_day = unix_seconds.rem_euclid(86_400);
     let (year, month, day) = civil_from_days(days);
     format!(
-        "{year:04}-{month:02}-{day:02} {:02}:{:02}",
+        "{year:04}-{month:02}-{day:02} {:02}:{:02}:{:02}",
         seconds_of_day / 3_600,
-        seconds_of_day % 3_600 / 60
+        seconds_of_day % 3_600 / 60,
+        seconds_of_day % 60
     )
+}
+
+/// Row icon: a folder for browsable entries, a page for files, a diamond for
+/// anything else, plus a small arrow marking symlinks. Painted with vectors
+/// instead of emoji fonts so rows render identically on every machine.
+fn kind_icon(ui: &mut egui::Ui, entry: &RemoteFileEntry) {
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(14.0, 14.0), egui::Sense::hover());
+    let painter = ui.painter();
+    if is_directory_like(entry) {
+        paint_folder(painter, rect);
+    } else if matches!(entry.kind, RemoteFileKind::File | RemoteFileKind::Symlink) {
+        paint_file(painter, rect);
+    } else {
+        paint_other(painter, rect);
+    }
+    if entry.kind == RemoteFileKind::Symlink {
+        paint_link_arrow(painter, rect);
+    }
+}
+
+fn paint_folder(painter: &egui::Painter, rect: egui::Rect) {
+    let tab = egui::Color32::from_rgb(0xD9, 0xA1, 0x2C);
+    let body = egui::Color32::from_rgb(0xFB, 0xC4, 0x4D);
+    painter.rect_filled(
+        egui::Rect::from_min_size(rect.left_top() + egui::vec2(0.0, 1.0), egui::vec2(6.5, 6.0)),
+        1.5,
+        tab,
+    );
+    painter.rect_filled(
+        egui::Rect::from_min_max(
+            rect.left_bottom() + egui::vec2(0.0, -9.5),
+            rect.right_bottom(),
+        ),
+        2.0,
+        body,
+    );
+}
+
+fn paint_file(painter: &egui::Painter, rect: egui::Rect) {
+    let paper = egui::Color32::from_rgb(0xBB, 0xC7, 0xD6);
+    let fold = egui::Color32::from_rgb(0x8B, 0x99, 0xAB);
+    let page = egui::Rect::from_min_size(
+        rect.left_top() + egui::vec2(2.0, 0.5),
+        egui::vec2(10.0, 13.0),
+    );
+    painter.rect_filled(page, 1.5, paper);
+    let tip = page.right_top();
+    painter.add(egui::Shape::convex_polygon(
+        vec![tip - egui::vec2(4.0, 0.0), tip, tip + egui::vec2(0.0, 4.0)],
+        fold,
+        egui::Stroke::NONE,
+    ));
+}
+
+fn paint_other(painter: &egui::Painter, rect: egui::Rect) {
+    let center = rect.center();
+    let radius = 4.5;
+    painter.add(egui::Shape::convex_polygon(
+        vec![
+            center + egui::vec2(0.0, -radius),
+            center + egui::vec2(radius, 0.0),
+            center + egui::vec2(0.0, radius),
+            center + egui::vec2(-radius, 0.0),
+        ],
+        egui::Color32::from_rgb(0x9A, 0xA5, 0xB4),
+        egui::Stroke::NONE,
+    ));
+}
+
+/// Small up-right arrow overlaid on symlink rows so links stay recognizable
+/// even when the target is a folder and the base icon is a folder.
+fn paint_link_arrow(painter: &egui::Painter, rect: egui::Rect) {
+    let stroke = egui::Stroke::new(1.6, egui::Color32::from_rgb(0x5B, 0x9B, 0xE8));
+    let start = egui::pos2(rect.left() + 6.0, rect.bottom() - 1.0);
+    let tip = egui::pos2(rect.right() - 1.0, rect.bottom() - 6.0);
+    painter.line_segment([start, tip], stroke);
+    painter.line_segment([tip, tip + egui::vec2(-3.4, 0.0)], stroke);
+    painter.line_segment([tip, tip + egui::vec2(0.0, 3.4)], stroke);
+}
+
+/// Folder rows never show a byte count, matching the reference layout.
+fn size_label(entry: &RemoteFileEntry, size_unit: FileSizeUnit) -> String {
+    if is_directory_like(entry) {
+        "—".to_owned()
+    } else {
+        entry
+            .size_bytes
+            .map_or_else(|| "—".to_owned(), |size| format_size(size, size_unit))
+    }
 }
 
 #[allow(clippy::too_many_lines)]
@@ -479,10 +641,11 @@ pub fn show(
                 }
             }
         }
+        // adb pull follows symlinks, so links to files are downloadable too.
         let can_download = state.transfer.is_none()
-            && state
-                .selected_entry()
-                .is_some_and(|entry| entry.kind == RemoteFileKind::File);
+            && state.selected_entry().is_some_and(|entry| {
+                matches!(entry.kind, RemoteFileKind::File | RemoteFileKind::Symlink)
+            });
         if ui
             .add_enabled(
                 can_download,
@@ -510,6 +673,14 @@ pub fn show(
         {
             commands.push(BackendCommand::CancelFileOperation(request_id));
         }
+        // Name filter pinned to the far right of the toolbar.
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            ui.add(
+                egui::TextEdit::singleline(&mut state.filter)
+                    .hint_text(text(language, "files_filter"))
+                    .desired_width(150.0),
+            );
+        });
     });
     ui.separator();
     if state.loading {
@@ -518,7 +689,13 @@ pub fn show(
             ui.label(text(language, "files_loading"));
         });
     }
-    let mut entries = state.entries.clone();
+    let needle = state.filter.trim().to_lowercase();
+    let mut entries: Vec<RemoteFileEntry> = state
+        .entries
+        .iter()
+        .filter(|entry| needle.is_empty() || entry.name.to_lowercase().contains(&needle))
+        .cloned()
+        .collect();
     sort_entries(&mut entries, state.sort_key, state.sort_reverse);
     // auto_shrink must be off: the default hugs the grid's content width,
     // which then truncates the last column (modification time) mid-glyph and
@@ -528,37 +705,53 @@ pub fn show(
         .show(ui, |ui| {
             egui::Grid::new("files-grid").striped(true).show(ui, |ui| {
                 sort_header(ui, language, state, SortKey::Name, "files_name");
+                ui.strong(text(language, "files_permissions"));
+                sort_header(ui, language, state, SortKey::Modified, "files_modified");
                 ui.strong(text(language, "files_type"));
                 sort_header(ui, language, state, SortKey::Size, "files_size");
-                sort_header(ui, language, state, SortKey::Modified, "files_modified");
                 ui.end_row();
-                for (index, entry) in entries.iter().enumerate() {
-                    let selected = state.selected == Some(index);
-                    let response = ui.selectable_label(selected, &entry.name);
+                for entry in &entries {
+                    let selected = state.selected.as_ref() == Some(&entry.path);
+                    let response = ui
+                        .horizontal(|ui| {
+                            kind_icon(ui, entry);
+                            ui.selectable_label(selected, &entry.name)
+                        })
+                        .inner;
                     if response.clicked() {
-                        state.selected = Some(index);
+                        state.selected = Some(entry.path.clone());
                     }
-                    if response.double_clicked() && entry.kind == RemoteFileKind::Directory {
+                    if response.double_clicked() && is_directory_like(entry) {
                         commands.push(state.navigate(target.clone(), entry.path.clone()));
                     }
                     response.context_menu(|ui| {
-                        state.selected = Some(index);
+                        state.selected = Some(entry.path.clone());
                         entry_context_menu(ui, language, state, &mut commands, &target, entry);
                     });
-                    ui.label(kind_label(language, entry.kind));
-                    ui.label(
-                        entry
-                            .size_bytes
-                            .map_or("—".to_owned(), |size| format_size(size, size_unit)),
-                    );
+                    ui.label(entry.permissions.as_deref().unwrap_or("—"));
                     ui.label(
                         entry
                             .modified_unix_seconds
                             .map_or_else(|| "—".to_owned(), format_modified_time),
                     );
+                    ui.label(kind_label(language, entry.kind));
+                    ui.label(size_label(entry, size_unit));
                     ui.end_row();
                 }
             });
+            // Distinguish "this folder is empty" from "the panel failed", so
+            // a blank table is never mistaken for a broken listing.
+            if !state.loading && state.error.is_none() && state.directory.is_some() {
+                if state.entries.is_empty() {
+                    ui.centered_and_justified(|ui| {
+                        ui.label(text(language, "files_empty"));
+                    });
+                } else if entries.is_empty() {
+                    ui.centered_and_justified(|ui| {
+                        ui.label(text(language, "files_no_match"));
+                    });
+                }
+            }
         });
     ui.horizontal(|ui| {
         let selected = state.selected_entry().cloned();
@@ -725,12 +918,11 @@ fn entry_context_menu(
     target: &DeviceTarget,
     entry: &RemoteFileEntry,
 ) {
-    if entry.kind == RemoteFileKind::Directory && ui.button(text(language, "files_enter")).clicked()
-    {
+    if is_directory_like(entry) && ui.button(text(language, "files_enter")).clicked() {
         commands.push(state.navigate(target.clone(), entry.path.clone()));
         ui.close();
     }
-    if entry.kind == RemoteFileKind::File
+    if matches!(entry.kind, RemoteFileKind::File | RemoteFileKind::Symlink)
         && ui
             .add_enabled(
                 state.transfer.is_none(),
@@ -800,6 +992,13 @@ mod tests {
     }
 
     #[test]
+    fn default_sort_is_modified_newest_first() {
+        let state = FilesPanelState::default();
+        assert_eq!(state.sort_key, SortKey::Modified);
+        assert!(state.sort_reverse);
+    }
+
+    #[test]
     fn navigation_records_history_for_back() {
         let mut state = FilesPanelState::default();
         let serial = fadb_domain::DeviceSerial::new("a").expect("valid");
@@ -828,8 +1027,21 @@ mod tests {
             path: RemotePath::new(format!("/sdcard/{name}")).expect("valid"),
             name: name.to_owned(),
             kind,
+            target_kind: None,
             size_bytes: size,
             modified_unix_seconds: modified,
+            permissions: None,
+        }
+    }
+
+    fn symlink_entry(name: &str, target_kind: Option<RemoteFileKind>) -> RemoteFileEntry {
+        RemoteFileEntry {
+            path: RemotePath::new(format!("/sdcard/{name}")).expect("valid"),
+            name: name.to_owned(),
+            kind: RemoteFileKind::Symlink,
+            target_kind,
+            size_bytes: None,
+            modified_unix_seconds: None,
             permissions: None,
         }
     }
@@ -838,23 +1050,89 @@ mod tests {
     fn sorts_entries_mixed_files_and_directories() {
         let mut entries = vec![
             entry("b.txt", RemoteFileKind::File, Some(2), Some(200)),
+            symlink_entry("zlink", Some(RemoteFileKind::Directory)),
             entry("dir", RemoteFileKind::Directory, None, None),
             entry("a.txt", RemoteFileKind::File, Some(1), Some(100)),
         ];
         sort_entries(&mut entries, SortKey::Name, false);
         let names: Vec<&str> = entries.iter().map(|entry| entry.name.as_str()).collect();
-        assert_eq!(names, vec!["a.txt", "b.txt", "dir"]);
+        // Folders (including symlinks to folders) group before files.
+        assert_eq!(names, vec!["dir", "zlink", "a.txt", "b.txt"]);
         sort_entries(&mut entries, SortKey::Modified, false);
-        // None (unknown time) sorts before Some(..).
-        assert_eq!(entries[0].name, "dir");
-        assert_eq!(entries[1].name, "a.txt");
+        // None (unknown time) sorts before Some(..), still inside the
+        // folder group.
+        assert!(is_directory_like(&entries[0]));
+        assert!(is_directory_like(&entries[1]));
+        assert_eq!(entries[2].name, "a.txt");
+        assert_eq!(entries[3].name, "b.txt");
         sort_entries(&mut entries, SortKey::Modified, true);
-        assert_eq!(entries[0].name, "b.txt");
+        // Reversing keeps the folder group on top.
+        assert!(is_directory_like(&entries[0]));
+        assert!(is_directory_like(&entries[1]));
+        assert_eq!(entries[2].name, "b.txt");
+        assert_eq!(entries[3].name, "a.txt");
+    }
+
+    #[test]
+    fn navigating_clears_previous_directory_rows() {
+        let mut state = FilesPanelState::default();
+        let serial = fadb_domain::DeviceSerial::new("a").expect("valid");
+        let target = DeviceTarget::new(serial, 1);
+        let _ = state.reconcile_target(Some(target.clone()));
+        state.directory = Some(RemotePath::new("/sdcard").expect("valid"));
+        state
+            .entries
+            .push(entry("stale.txt", RemoteFileKind::File, Some(1), Some(1)));
+        let _ = state.navigate(target, RemotePath::new("/data").expect("valid"));
+        assert!(state.entries.is_empty());
+        assert_eq!(state.selected, None);
+    }
+
+    #[test]
+    fn sdcard_failure_falls_back_to_root_once() {
+        let mut state = FilesPanelState::default();
+        let serial = fadb_domain::DeviceSerial::new("a").expect("valid");
+        let target = DeviceTarget::new(serial, 1);
+        let command = state
+            .reconcile_target(Some(target.clone()))
+            .expect("initial listing");
+        let BackendCommand::ListDirectory {
+            request_id, path, ..
+        } = command
+        else {
+            panic!("expected ListDirectory");
+        };
+        assert_eq!(path.as_str(), "/sdcard");
+        let fail = |request_id, path| BackendEvent::DirectoryFailed {
+            request_id,
+            target: target.clone(),
+            path,
+            error: fadb_domain::BridgeError::new(
+                fadb_domain::ErrorCode::PathNotFound,
+                "file.path_not_found",
+                "missing",
+            ),
+        };
+        // The bootstrap /sdcard listing failing retries at the root.
+        let commands = state.handle_event(
+            Language::English,
+            &fail(request_id, RemotePath::new("/sdcard").expect("valid")),
+        );
+        let Some(BackendCommand::ListDirectory {
+            request_id, path, ..
+        }) = commands.first()
+        else {
+            panic!("expected root fallback, got {commands:?}");
+        };
+        assert_eq!(path.as_str(), "/");
+        // A failing root listing must not loop the fallback.
+        let commands = state.handle_event(Language::English, &fail(*request_id, path.clone()));
+        assert!(commands.is_empty());
     }
 
     #[test]
     fn formats_known_timestamp() {
-        assert_eq!(format_modified_time(1_700_000_000), "2023-11-14 22:13");
+        assert_eq!(format_modified_time(1_700_000_000), "2023-11-14 22:13:20");
     }
 
     #[test]

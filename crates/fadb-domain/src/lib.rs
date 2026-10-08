@@ -105,6 +105,11 @@ pub struct RemoteFileEntry {
     pub path: RemotePath,
     pub name: String,
     pub kind: RemoteFileKind,
+    /// For symlinks: the kind of the entry the link resolves to, so the UI
+    /// can treat a link to a directory like a directory. `None` when the
+    /// entry is not a symlink or its target does not exist.
+    #[serde(default)]
+    pub target_kind: Option<RemoteFileKind>,
     pub size_bytes: Option<u64>,
     pub modified_unix_seconds: Option<i64>,
     pub permissions: Option<String>,

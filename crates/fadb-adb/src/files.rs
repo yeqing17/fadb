@@ -11,15 +11,27 @@ use crate::process;
 const TRANSFER_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 const METADATA_LIMIT: usize = 8 * 1024 * 1024;
 const STDERR_LIMIT: usize = 1024 * 1024;
+// One adb roundtrip for the whole listing: the leading `t` record carries the
+// device clock (previously a second, serialized `adb shell date +%s` probe),
+// and each entry spends a single `stat` process on all three metadata fields
+// instead of three (forks dominate large directories on slow devices). `|`
+// is safe as the in-record separator: size/mtime/perms are digits and rwx
+// letters only — file names never pass through stat.
 const LIST_SCRIPT: &str = r#"directory=$1
+now=$(date +%s 2>/dev/null || true)
+printf 't\034%s\000' "$now"
 for entry in "$directory"/* "$directory"/.[!.]* "$directory"/..?*; do
   [ -e "$entry" ] || [ -L "$entry" ] || continue
   name=${entry##*/}
-  if [ -L "$entry" ]; then kind=l; elif [ -d "$entry" ]; then kind=d; elif [ -f "$entry" ]; then kind=f; else kind=o; fi
-  size=$(stat -c %s "$entry" 2>/dev/null || true)
-  modified=$(stat -c %Y "$entry" 2>/dev/null || true)
-  permissions=$(stat -c %A "$entry" 2>/dev/null || true)
-  printf '%s\034%s\034%s\034%s\034%s\000' "$kind" "$name" "$size" "$modified" "$permissions"
+  if [ -L "$entry" ]; then kind=l
+    if [ -d "$entry" ]; then target=d
+    elif [ -f "$entry" ]; then target=f
+    else target=o; fi
+  elif [ -d "$entry" ]; then kind=d; target=d
+  elif [ -f "$entry" ]; then kind=f; target=f
+  else kind=o; target=o; fi
+  metadata=$(stat -c '%s|%Y|%A' "$entry" 2>/dev/null || true)
+  printf '%s\034%s\034%s\034%s\000' "$kind" "$name" "$target" "$metadata"
 done"#;
 
 /// Quote `word` for POSIX shells so it survives the remote shell verbatim.
@@ -67,38 +79,14 @@ pub(crate) async fn list_directory(
     if output.exit_code != Some(0) {
         return Err(map_command_error(&output.stderr, "file.list_failed"));
     }
-    let offset = device_utc_offset_seconds(executable, serial).await;
-    parse_directory_entries(path, &output.stdout, offset)
-}
-
-/// Ask the device for its wall clock and compare it with the host UTC clock to
-/// estimate the device timezone offset (rounded to 15 minutes so small clock
-/// skew does not leak into timestamps). Returns 0 when the probe fails.
-async fn device_utc_offset_seconds(executable: &Path, serial: &fadb_domain::DeviceSerial) -> i64 {
-    let output = process::run_bounded(
-        executable,
-        shell_arguments(serial, "date +%s", &[]),
-        Duration::from_secs(8),
-        1024,
-        1024,
+    let host_now_seconds = i64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_secs())
+            .unwrap_or_default(),
     )
-    .await;
-    let Ok(output) = output else {
-        return 0;
-    };
-    let device_now = String::from_utf8_lossy(&output.stdout)
-        .trim()
-        .parse::<i64>();
-    match device_now {
-        Ok(device_now) => {
-            let host_now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|duration| i64::try_from(duration.as_secs()).unwrap_or_default())
-                .unwrap_or_default();
-            ((device_now - host_now + 450) / 900) * 900
-        }
-        Err(_) => 0,
-    }
+    .unwrap_or_default();
+    parse_directory_entries(path, &output.stdout, host_now_seconds)
 }
 
 pub(crate) async fn push_file(
@@ -321,51 +309,84 @@ async fn run_transfer(
 fn parse_directory_entries(
     directory: &RemotePath,
     output: &[u8],
-    utc_offset_seconds: i64,
+    host_now_seconds: i64,
 ) -> Result<Vec<RemoteFileEntry>, BridgeError> {
+    let text = |bytes: &[u8]| {
+        String::from_utf8(bytes.to_vec()).map_err(|error| {
+            BridgeError::new(
+                ErrorCode::AdbFailed,
+                "file.name_not_utf8",
+                error.to_string(),
+            )
+        })
+    };
+    let mut utc_offset_seconds: i64 = 0;
     let mut entries = Vec::new();
     for record in output
         .split(|byte| *byte == 0)
         .filter(|record| !record.is_empty())
     {
         let fields = record.split(|byte| *byte == 0x1c).collect::<Vec<_>>();
-        if fields.len() != 5 {
-            return Err(BridgeError::new(
-                ErrorCode::AdbFailed,
-                "file.list_invalid_record",
-                "device returned an invalid directory record",
-            ));
-        }
-        let text = |bytes: &[u8]| {
-            String::from_utf8(bytes.to_vec()).map_err(|error| {
-                BridgeError::new(
+        match fields.as_slice() {
+            // Leading clock record: `t\034<device unix seconds>` used to
+            // render timestamps in the device's own timezone.
+            [b"t", now] => {
+                if let Ok(device_now) = text(now)?.trim().parse::<i64>() {
+                    // Round to 15 minutes so small clock skew does not leak
+                    // into timestamps.
+                    utc_offset_seconds = ((device_now - host_now_seconds + 450) / 900) * 900;
+                }
+            }
+            [kind, name, target, metadata] => {
+                let parsed_kind = match *kind {
+                    b"d" => RemoteFileKind::Directory,
+                    b"f" => RemoteFileKind::File,
+                    b"l" => RemoteFileKind::Symlink,
+                    _ => RemoteFileKind::Other,
+                };
+                let target_kind = match *target {
+                    b"d" => Some(RemoteFileKind::Directory),
+                    b"f" => Some(RemoteFileKind::File),
+                    b"o" => Some(RemoteFileKind::Other),
+                    _ => None,
+                };
+                // `<size>|<mtime>|<permissions>`; wholly empty when stat is
+                // unavailable on the device.
+                let metadata = text(metadata)?;
+                let mut parts = metadata.split('|');
+                let name = text(name)?;
+                entries.push(RemoteFileEntry {
+                    path: directory.join_component(&name)?,
+                    name,
+                    kind: parsed_kind,
+                    // Only symlinks carry a resolved target; regular entries
+                    // are what they are.
+                    target_kind: if parsed_kind == RemoteFileKind::Symlink {
+                        target_kind
+                    } else {
+                        None
+                    },
+                    size_bytes: parts.next().unwrap_or_default().parse().ok(),
+                    modified_unix_seconds: parts.next().unwrap_or_default().parse().ok(),
+                    permissions: parts
+                        .next()
+                        .filter(|permissions| !permissions.is_empty())
+                        .map(str::to_owned),
+                });
+            }
+            _ => {
+                return Err(BridgeError::new(
                     ErrorCode::AdbFailed,
-                    "file.name_not_utf8",
-                    error.to_string(),
-                )
-            })
-        };
-        let kind = match fields[0] {
-            b"d" => RemoteFileKind::Directory,
-            b"f" => RemoteFileKind::File,
-            b"l" => RemoteFileKind::Symlink,
-            _ => RemoteFileKind::Other,
-        };
-        let name = text(fields[1])?;
-        entries.push(RemoteFileEntry {
-            path: directory.join_component(&name)?,
-            name,
-            kind,
-            size_bytes: text(fields[2])?.parse().ok(),
-            modified_unix_seconds: text(fields[3])?
-                .parse::<i64>()
-                .ok()
-                .map(|seconds| seconds + utc_offset_seconds),
-            permissions: match text(fields[4])? {
-                value if value.is_empty() => None,
-                value => Some(value),
-            },
-        });
+                    "file.list_invalid_record",
+                    "device returned an invalid directory record",
+                ));
+            }
+        }
+    }
+    for entry in &mut entries {
+        if let Some(seconds) = entry.modified_unix_seconds {
+            entry.modified_unix_seconds = Some(seconds + utc_offset_seconds);
+        }
     }
     entries.sort_by(|left, right| {
         let left_rank = u8::from(left.kind != RemoteFileKind::Directory);
@@ -405,11 +426,52 @@ mod tests {
     #[test]
     fn parses_nul_delimited_directory_entries() {
         let directory = RemotePath::new("/sdcard").expect("valid path");
-        let output = b"d\x1cDownload\x1c4096\x1c1700000000\x1cdrwxr-xr-x\0f\x1cspace name.txt\x1c12\x1c\x1c-rw-r--r--\0";
-        let entries = parse_directory_entries(&directory, output, 0).expect("valid listing");
+        // Device clock runs exactly one hour ahead of the host clock.
+        let output = b"t\x1c1700003600\0\
+d\x1cDownload\x1cd\x1c4096|1700000000|drwxr-xr-x\0\
+f\x1cspace name.txt\x1cf\x1c12|1690000000|-rw-r--r--\0";
+        let entries =
+            parse_directory_entries(&directory, output, 1_700_000_000).expect("valid listing");
         assert_eq!(entries.len(), 2);
         assert_eq!(entries[0].name, "Download");
+        assert_eq!(entries[0].target_kind, None);
+        // Timestamps are shifted into the device's timezone.
+        assert_eq!(
+            entries[0].modified_unix_seconds,
+            Some(1_700_000_000 + 3_600)
+        );
         assert_eq!(entries[1].path.as_str(), "/sdcard/space name.txt");
+        assert_eq!(entries[1].permissions.as_deref(), Some("-rw-r--r--"));
+    }
+
+    #[test]
+    fn resolves_symlink_target_kinds() {
+        let directory = RemotePath::new("/").expect("valid path");
+        let output = b"t\x1c\0\
+l\x1csdcard\x1cd\x1c|1690000000|lrw-r--r--\0\
+l\x1cbroken\x1co\x1c||\0\
+l\x1clink.txt\x1cf\x1c12|1690000000|lrwxrwxrwx\0";
+        let entries = parse_directory_entries(&directory, output, 0).expect("valid listing");
+        // Entries are sorted by name within the same kind.
+        assert_eq!(entries[0].name, "broken");
+        assert_eq!(entries[0].kind, RemoteFileKind::Symlink);
+        assert_eq!(entries[0].target_kind, Some(RemoteFileKind::Other));
+        assert_eq!(entries[1].target_kind, Some(RemoteFileKind::File));
+        assert_eq!(entries[2].name, "sdcard");
+        assert_eq!(entries[2].target_kind, Some(RemoteFileKind::Directory));
+    }
+
+    #[test]
+    fn clock_offset_rounds_to_quarter_hours() {
+        let directory = RemotePath::new("/sdcard").expect("valid path");
+        let listing = |device_now: i64| {
+            let output = format!("t\x1c{device_now}\0f\x1ca.txt\x1cf\x1c1|1000000|-rw-r--r--\0");
+            parse_directory_entries(&directory, output.as_bytes(), 1_000_000)
+                .expect("valid listing")
+        };
+        // 449s of skew rounds down to 0, the 450s midpoint rounds up to 900.
+        assert_eq!(listing(1_000_449)[0].modified_unix_seconds, Some(1_000_000));
+        assert_eq!(listing(1_000_450)[0].modified_unix_seconds, Some(1_000_900));
     }
 
     #[test]

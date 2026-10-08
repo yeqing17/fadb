@@ -562,6 +562,7 @@ impl AdbTransport for FakeAdbTransport {
                 } else {
                     RemoteFileKind::Directory
                 },
+                target_kind: None,
                 size_bytes: content.as_ref().map(|bytes| bytes.len() as u64),
                 modified_unix_seconds: None,
                 permissions: None,
