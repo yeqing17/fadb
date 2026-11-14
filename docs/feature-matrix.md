@@ -17,7 +17,7 @@
 | 网络设备 | ✅ | `adb connect` + 最多 8 个记忆端点 |
 | 假设备后端 | ✅ | `FADB_FAKE=1` 确定性数据 |
 | 设备概览 | ✅ | 型号、电池、内存、存储 |
-| 交互式终端 | ✅ | 子进程 PTY(`adb shell -tt`)、ANSI、resize、可编辑快捷指令栏(JSON 导入/导出) |
+| 交互式终端 | ✅ | 子进程 PTY(`adb shell -tt`)、ANSI、resize、多标签多会话(每标签独立会话)、可编辑快捷指令栏(JSON 导入/导出) |
 | 截图 | ✅ | 二进制安全的 `exec-out screencap`、适应/100%、保存/复制 |
 | AI 助手 | ✅ | 提供方中立;OpenAI 兼容单轮对话 |
 | Logcat | ✅ | 实时流、级别着色/过滤、搜索、保存 |
