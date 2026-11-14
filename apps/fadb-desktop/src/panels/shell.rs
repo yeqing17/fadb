@@ -1044,11 +1044,6 @@ mod tests {
         let session_id = opened_session(state.auto_connect(Some(&record)).as_ref());
         // Connecting or connected: no duplicate session.
         assert!(state.auto_connect(Some(&record)).is_none());
-        // A device that is not online is never auto-connected.
-        let mut state = ShellPanelState::default();
-        let mut offline = online_record();
-        offline.descriptor.state = fadb_domain::DeviceState::Unauthorized;
-        assert!(state.auto_connect(Some(&offline)).is_none());
         // A failed attempt is never fought by the reconnect loop.
         state.handle_event(&BackendEvent::ShellFailed {
             session_id,
@@ -1056,6 +1051,11 @@ mod tests {
         });
         assert_eq!(state.active().status, ShellStatus::Failed);
         assert!(state.auto_connect(Some(&record)).is_none());
+        // A device that is not online is never auto-connected.
+        let mut offline = online_record();
+        offline.descriptor.state = fadb_domain::DeviceState::Unauthorized;
+        let mut fresh = ShellPanelState::default();
+        assert!(fresh.auto_connect(Some(&offline)).is_none());
     }
 
     #[test]
