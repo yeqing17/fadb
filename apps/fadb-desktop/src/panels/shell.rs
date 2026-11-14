@@ -24,49 +24,60 @@ pub enum ShellStatus {
     Failed,
 }
 
-pub struct ShellPanelState {
+/// A `(row, column)` position in the terminal grid.
+type TerminalCell = (u16, u16);
+
+/// One independent adb shell session, shown as a tab in the terminal panel.
+///
+/// Sessions own their VT parser and connection state, so several devices can
+/// stay connected at the same time; switching tabs only changes which session
+/// is painted. The backend already routes every command and event by
+/// `ShellSessionId`, so the tabs map one-to-one onto backend sessions.
+pub struct TerminalSession {
     parser: vt100::Parser,
     viewport_rows: u16,
     target: Option<DeviceTarget>,
+    /// Device label captured when the tab was bound; shown on the tab.
+    device_label: Option<String>,
+    /// Ordinal used for the default title until a device is bound.
+    number: usize,
     session_id: Option<ShellSessionId>,
     status: ShellStatus,
     error: Option<BridgeError>,
     focus_terminal: bool,
+    /// Cleared for the replacement tab created when the user closes the last
+    /// tab, so the auto-connect preference does not instantly reopen it.
+    auto_connect_armed: bool,
     /// Lazily created system-clipboard handle for the paste actions; egui
     /// only exposes clipboard reads through the Ctrl+V event.
     clipboard: Option<arboard::Clipboard>,
     /// Grid-cell selection over the visible viewport: `(anchor, head)`, each
     /// a `(row, column)` pair in `TerminalCell` units.
     selection: Option<(TerminalCell, TerminalCell)>,
-    /// One-click commands (Xshell-style quick commands) for this panel.
-    pub quick_commands: QuickCommandStore,
 }
 
-/// A `(row, column)` position in the terminal grid.
-type TerminalCell = (u16, u16);
-
-impl Default for ShellPanelState {
-    fn default() -> Self {
+impl TerminalSession {
+    fn new(number: usize) -> Self {
         Self {
             parser: vt100::Parser::new(INITIAL_TERMINAL_ROWS, TERMINAL_COLUMNS, SCROLLBACK_ROWS),
             viewport_rows: INITIAL_TERMINAL_ROWS,
             target: None,
+            device_label: None,
+            number,
             session_id: None,
             status: ShellStatus::Disconnected,
             error: None,
             focus_terminal: false,
+            auto_connect_armed: true,
             clipboard: None,
             selection: None,
-            quick_commands: QuickCommandStore::default(),
         }
     }
-}
 
-impl ShellPanelState {
-    pub fn handle_event(&mut self, event: &BackendEvent) {
+    fn handle_event(&mut self, event: &BackendEvent) {
         match event {
-            BackendEvent::ShellOpened { target, session_id }
-                if self.target.as_ref() == Some(target) && self.session_id == Some(*session_id) =>
+            BackendEvent::ShellOpened { session_id, .. }
+                if self.session_id == Some(*session_id) =>
             {
                 self.status = ShellStatus::Connected;
                 self.error = None;
@@ -95,37 +106,54 @@ impl ShellPanelState {
         }
     }
 
-    pub fn reconcile_target(&mut self, selected: Option<&DeviceRecord>) -> Vec<BackendCommand> {
-        let selected_target = selected.map(DeviceRecord::target);
-        if self.target == selected_target {
-            return Vec::new();
-        }
-        let mut commands = Vec::new();
-        if let Some(session_id) = self.session_id.take() {
-            commands.push(BackendCommand::CloseShell(session_id));
-        }
-        self.target = selected_target;
-        self.status = ShellStatus::Disconnected;
-        self.error = None;
-        self.selection = None;
-        self.clear_display();
-        commands
+    /// Points the tab at a device. Called whenever the tab is (re)connected
+    /// or created, so a tab that was never connected simply follows the
+    /// current device selection.
+    fn bind_target(&mut self, selected: Option<&DeviceRecord>) {
+        let Some(record) = selected else {
+            return;
+        };
+        self.target = Some(record.target());
+        self.device_label = Some(record.descriptor.display_name().to_owned());
     }
 
-    /// Opens a session on the selected device with no extra click. Fires
-    /// only from the pristine `Disconnected` state: an explicit disconnect
-    /// (`Exited`) or a failed attempt (`Failed`) is never fought by a
-    /// reconnect loop. Call after [`Self::reconcile_target`] so the target
-    /// tracks the current selection.
-    pub fn auto_connect(&mut self, selected: Option<&DeviceRecord>) -> Option<BackendCommand> {
-        if self.status != ShellStatus::Disconnected {
+    fn tab_title(&self, language: Language) -> String {
+        match &self.device_label {
+            Some(label) if !label.is_empty() => label.clone(),
+            _ => format!("{} {}", text(language, "shell_session"), self.number),
+        }
+    }
+
+    fn tab_tooltip(&self, language: Language) -> String {
+        let status = status_style(language, self.status).0;
+        match &self.target {
+            Some(target) => format!(
+                "{}\n{}\n{}",
+                self.tab_title(language),
+                target.serial.as_str(),
+                status
+            ),
+            None => format!("{}\n{}", self.tab_title(language), status),
+        }
+    }
+
+    fn connect(&mut self, selected: Option<&DeviceRecord>) -> Option<BackendCommand> {
+        if self.session_id.is_some() {
             return None;
         }
-        let online = selected.is_some_and(|record| record.descriptor.state.is_online());
-        if !online {
-            return None;
-        }
-        self.connect()
+        self.bind_target(selected);
+        let target = self.target.clone()?;
+        let session_id = ShellSessionId::new();
+        self.session_id = Some(session_id);
+        self.status = ShellStatus::Connecting;
+        self.error = None;
+        let size = ShellSize::new(TERMINAL_COLUMNS, self.viewport_rows)
+            .expect("viewport shell size is valid");
+        Some(BackendCommand::OpenShell {
+            target,
+            session_id,
+            size,
+        })
     }
 
     /// The selection in reading order, or `None` when empty or collapsed.
@@ -187,21 +215,6 @@ impl ShellPanelState {
         self.clipboard.as_mut()?.get_text().ok()
     }
 
-    fn connect(&mut self) -> Option<BackendCommand> {
-        let target = self.target.clone()?;
-        let session_id = ShellSessionId::new();
-        self.session_id = Some(session_id);
-        self.status = ShellStatus::Connecting;
-        self.error = None;
-        let size = ShellSize::new(TERMINAL_COLUMNS, self.viewport_rows)
-            .expect("viewport shell size is valid");
-        Some(BackendCommand::OpenShell {
-            target,
-            session_id,
-            size,
-        })
-    }
-
     fn write(&mut self, bytes: Vec<u8>) -> Option<BackendCommand> {
         let session_id = self.session_id?;
         let input = ShellInput::new(bytes).ok()?;
@@ -244,6 +257,196 @@ impl ShellPanelState {
     }
 }
 
+/// The terminal panel: a row of tabs over one active [`TerminalSession`],
+/// plus the quick-command toolbar shared by every tab.
+pub struct ShellPanelState {
+    sessions: Vec<TerminalSession>,
+    active: usize,
+    next_number: usize,
+    /// One-click commands (Xshell-style quick commands), shared by all tabs.
+    pub quick_commands: QuickCommandStore,
+}
+
+impl Default for ShellPanelState {
+    fn default() -> Self {
+        Self {
+            sessions: vec![TerminalSession::new(1)],
+            active: 0,
+            next_number: 2,
+            quick_commands: QuickCommandStore::default(),
+        }
+    }
+}
+
+impl ShellPanelState {
+    fn active(&self) -> &TerminalSession {
+        &self.sessions[self.active]
+    }
+
+    fn active_mut(&mut self) -> &mut TerminalSession {
+        &mut self.sessions[self.active]
+    }
+
+    fn ensure_session(&mut self) {
+        if self.sessions.is_empty() {
+            self.sessions.push(TerminalSession::new(self.next_number));
+            self.next_number += 1;
+            self.active = 0;
+        }
+    }
+
+    /// Opens a new tab bound to `selected` and makes it active.
+    fn new_session(&mut self, selected: Option<&DeviceRecord>) {
+        let mut session = TerminalSession::new(self.next_number);
+        self.next_number += 1;
+        session.bind_target(selected);
+        self.sessions.push(session);
+        self.active = self.sessions.len() - 1;
+    }
+
+    /// Drops a tab after asking the backend to close its live session. The
+    /// panel always keeps one tab, so the empty state needs no special case.
+    fn close_session(&mut self, index: usize) -> Option<BackendCommand> {
+        if index >= self.sessions.len() {
+            return None;
+        }
+        let session = self.sessions.remove(index);
+        if self.sessions.is_empty() {
+            let mut replacement = TerminalSession::new(self.next_number);
+            self.next_number += 1;
+            replacement.auto_connect_armed = false;
+            self.sessions.push(replacement);
+        } else if index < self.active {
+            self.active -= 1;
+        } else if self.active >= self.sessions.len() {
+            self.active = self.sessions.len() - 1;
+        }
+        session.session_id.map(BackendCommand::CloseShell)
+    }
+
+    fn select_next(&mut self) {
+        if self.sessions.len() > 1 {
+            self.active = (self.active + 1) % self.sessions.len();
+        }
+    }
+
+    fn select_previous(&mut self) {
+        if self.sessions.len() > 1 {
+            self.active = (self.active + self.sessions.len() - 1) % self.sessions.len();
+        }
+    }
+
+    pub fn handle_event(&mut self, event: &BackendEvent) {
+        for session in &mut self.sessions {
+            session.handle_event(event);
+        }
+    }
+
+    /// Opens a session on the selected device with no extra click. Fires
+    /// only for the active tab, and only from the pristine `Disconnected`
+    /// state: an explicit disconnect (`Exited`), a failed attempt (`Failed`)
+    /// or a tab the user just closed is never fought by a reconnect loop.
+    pub fn auto_connect(&mut self, selected: Option<&DeviceRecord>) -> Option<BackendCommand> {
+        self.ensure_session();
+        let online = selected.is_some_and(|record| record.descriptor.state.is_online());
+        if !online {
+            return None;
+        }
+        let session = self.active_mut();
+        if !session.auto_connect_armed || session.status != ShellStatus::Disconnected {
+            return None;
+        }
+        session.connect(selected)
+    }
+}
+
+/// New-tab and tab-switching shortcuts, checked before the terminal reads its
+/// events so they never leak into the shell as control bytes. Ctrl+Tab is not
+/// an xterm control sequence and Ctrl+Shift+letter stays out of the control
+/// range that `key_bytes` produces, so both are safe to claim here.
+fn handle_shortcuts(
+    ui: &egui::Ui,
+    selected: Option<&DeviceRecord>,
+    state: &mut ShellPanelState,
+    commands: &mut Vec<BackendCommand>,
+) {
+    let ctrl_shift = egui::Modifiers {
+        ctrl: true,
+        shift: true,
+        ..egui::Modifiers::NONE
+    };
+    // Most specific first: `consume_key` ignores extra Shift/Alt modifiers,
+    // so Ctrl+Shift+Tab would otherwise also match the plain Ctrl+Tab pattern.
+    if ui.input_mut(|input| input.consume_key(ctrl_shift, egui::Key::W)) {
+        let active = state.active;
+        if let Some(command) = state.close_session(active) {
+            commands.push(command);
+        }
+    }
+    if ui.input_mut(|input| input.consume_key(ctrl_shift, egui::Key::T)) {
+        state.new_session(selected);
+    }
+    if ui.input_mut(|input| input.consume_key(ctrl_shift, egui::Key::Tab)) {
+        state.select_previous();
+    }
+    if ui.input_mut(|input| input.consume_key(egui::Modifiers::CTRL, egui::Key::Tab)) {
+        state.select_next();
+    }
+}
+
+fn show_tab_bar(
+    ui: &mut egui::Ui,
+    language: Language,
+    selected: Option<&DeviceRecord>,
+    state: &mut ShellPanelState,
+    commands: &mut Vec<BackendCommand>,
+) {
+    let mut select: Option<usize> = None;
+    let mut close: Option<usize> = None;
+    let mut create = false;
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing.x = 4.0;
+        for (index, session) in state.sessions.iter().enumerate() {
+            let is_active = index == state.active;
+            let (_, color) = status_style(language, session.status);
+            ui.colored_label(color, egui::RichText::new("●").size(9.0));
+            if ui
+                .selectable_label(is_active, session.tab_title(language))
+                .on_hover_text(session.tab_tooltip(language))
+                .clicked()
+            {
+                select = Some(index);
+            }
+            if ui
+                .add(egui::Button::new("×").small().frame(false))
+                .on_hover_text(text(language, "shell_close_session"))
+                .clicked()
+            {
+                close = Some(index);
+            }
+            ui.add_space(2.0);
+        }
+        if ui
+            .small_button("+")
+            .on_hover_text(text(language, "shell_new_session"))
+            .clicked()
+        {
+            create = true;
+        }
+    });
+    if let Some(index) = select {
+        state.active = index;
+    }
+    if create {
+        state.new_session(selected);
+    }
+    if let Some(index) = close
+        && let Some(command) = state.close_session(index)
+    {
+        commands.push(command);
+    }
+}
+
 #[allow(clippy::too_many_lines)]
 pub fn show(
     ui: &mut egui::Ui,
@@ -252,78 +455,89 @@ pub fn show(
     selected: Option<&DeviceRecord>,
     state: &mut ShellPanelState,
 ) -> Vec<BackendCommand> {
-    let mut commands = state.reconcile_target(selected);
+    state.ensure_session();
+    let mut commands = Vec::new();
+    handle_shortcuts(ui, selected, state, &mut commands);
     // The panel hint is too chatty to spend a permanent line on; it surfaces
     // as a tooltip on the title instead.
     ui.horizontal(|ui| {
         ui.heading(text(language, "shell_title"))
             .on_hover_text(text(language, "shell_hint"));
         ui.separator();
-        let (label, color) = status_style(language, state.status);
+        let (label, color) = status_style(language, state.active().status);
         ui.colored_label(color, label);
     });
-    ui.add_space(6.0);
+    ui.add_space(4.0);
+    show_tab_bar(ui, language, selected, state, &mut commands);
+    ui.add_space(4.0);
 
     let online = selected.is_some_and(|record| record.descriptor.state.is_online());
-    let connected = state.connected();
+    let active = state.active;
+    // Split the panel state by field so the active session and the shared
+    // quick-command store can be borrowed at the same time.
+    let ShellPanelState {
+        sessions,
+        quick_commands: quick,
+        ..
+    } = &mut *state;
+    let session = &mut sessions[active];
+    let connected = session.connected();
     // One wrapping row: session controls first, quick commands after a small
     // separator, so both share the same line and the terminal keeps the rest
     // of the panel.
     ui.horizontal_wrapped(|ui| {
         if ui
             .add_enabled(
-                online && state.session_id.is_none(),
+                online && session.session_id.is_none(),
                 egui::Button::new(text(language, "connect")),
             )
             .clicked()
-            && let Some(command) = state.connect()
+            && let Some(command) = session.connect(selected)
         {
             commands.push(command);
         }
         if ui
             .add_enabled(
-                state.session_id.is_some(),
+                session.session_id.is_some(),
                 egui::Button::new(text(language, "shell_disconnect")),
             )
             .clicked()
-            && let Some(command) = state.close()
+            && let Some(command) = session.close()
         {
             commands.push(command);
         }
         if ui.button(text(language, "shell_clear_display")).clicked() {
-            state.clear_display();
+            session.clear_display();
         }
         if ui.button(text(language, "shell_copy_visible")).clicked() {
-            ui.ctx().copy_text(state.parser.screen().contents());
+            ui.ctx().copy_text(session.parser.screen().contents());
         }
         if ui
             .add_enabled(
-                state.session_id.is_some(),
+                session.session_id.is_some(),
                 egui::Button::new(text(language, "shell_paste")),
             )
             .clicked()
-            && let Some(clipboard) = state.clipboard_text().filter(|text| !text.is_empty())
+            && let Some(clipboard) = session.clipboard_text().filter(|text| !text.is_empty())
         {
-            let payload = state.paste_payload(&clipboard);
-            if let Some(command) = state.write(payload) {
+            let payload = session.paste_payload(&clipboard);
+            if let Some(command) = session.write(payload) {
                 commands.push(command);
             }
         }
         if ui.button(text(language, "shell_focus_terminal")).clicked() {
-            state.focus_terminal = true;
+            session.focus_terminal = true;
         }
         ui.separator();
         // Quick commands: click to send. Disabled until a session is live.
-        for command in
-            quick_commands::show_inline(ui, language, &mut state.quick_commands, connected)
-        {
-            for command in state.send_quick_command(&command) {
-                commands.push(command);
+        for command in quick_commands::show_inline(ui, language, quick, connected) {
+            for chunk in session.send_quick_command(&command) {
+                commands.push(chunk);
             }
         }
     });
-    if state.quick_commands.manage_open {
-        quick_commands::show_manage_window(context, language, &mut state.quick_commands);
+    if quick.manage_open {
+        quick_commands::show_manage_window(context, language, quick);
     }
 
     if !online {
@@ -332,17 +546,17 @@ pub fn show(
             text(language, "shell_select_online"),
         );
     }
-    if let Some(error) = &state.error {
+    if let Some(error) = &session.error {
         ui.colored_label(Color32::LIGHT_RED, error_text(language, error));
     }
 
     ui.add_space(6.0);
     let desired = ui.available_size().max(egui::vec2(400.0, 260.0));
     let (rect, response) = ui.allocate_exact_size(desired, egui::Sense::click_and_drag());
-    state.resize_viewport(viewport_rows(ui, rect));
-    if response.clicked() || state.focus_terminal {
+    session.resize_viewport(viewport_rows(ui, rect));
+    if response.clicked() || session.focus_terminal {
         response.request_focus();
-        state.focus_terminal = false;
+        session.focus_terminal = false;
     }
     if response.has_focus() {
         ui.memory_mut(|memory| {
@@ -356,9 +570,9 @@ pub fn show(
                 },
             );
         });
-        if state.connected() {
-            for bytes in terminal_input(ui, state.parser.screen()) {
-                if let Some(command) = state.write(bytes) {
+        if session.connected() {
+            for bytes in terminal_input(ui, session.parser.screen()) {
+                if let Some(command) = session.write(bytes) {
                     commands.push(command);
                 }
             }
@@ -367,15 +581,15 @@ pub fn show(
     // Text selection: drag to highlight, release to copy. A plain click
     // collapses the selection again. The context menu mirrors the toolbar
     // clipboard actions for mouse-only workflows.
-    handle_terminal_pointer(ui, language, state, &response, rect, &mut commands);
+    handle_terminal_pointer(ui, language, session, &response, rect, &mut commands);
     paint_terminal(
         ui,
         language,
         rect,
-        state.parser.screen(),
-        state.ordered_selection(),
+        session.parser.screen(),
+        session.ordered_selection(),
         response.has_focus(),
-        state.status == ShellStatus::Disconnected,
+        session.status == ShellStatus::Disconnected,
     );
     commands
 }
@@ -385,7 +599,7 @@ pub fn show(
 fn handle_terminal_pointer(
     ui: &egui::Ui,
     language: Language,
-    state: &mut ShellPanelState,
+    session: &mut TerminalSession,
     response: &egui::Response,
     rect: egui::Rect,
     commands: &mut Vec<BackendCommand>,
@@ -393,29 +607,29 @@ fn handle_terminal_pointer(
     if response.drag_started()
         && let Some(pos) = response.interact_pointer_pos()
     {
-        let cell = cell_at_pointer(ui, rect, state.viewport_rows, pos);
-        state.selection = Some((cell, cell));
+        let cell = cell_at_pointer(ui, rect, session.viewport_rows, pos);
+        session.selection = Some((cell, cell));
     }
     if response.dragged()
         && let Some(pos) = response.interact_pointer_pos()
-        && let Some((_, head)) = state.selection.as_mut()
+        && let Some((_, head)) = session.selection.as_mut()
     {
-        *head = cell_at_pointer(ui, rect, state.viewport_rows, pos);
+        *head = cell_at_pointer(ui, rect, session.viewport_rows, pos);
     }
     if response.drag_stopped()
-        && state
+        && session
             .ordered_selection()
             .is_some_and(|(start, end)| start != end)
-        && let Some(selected) = state.selection_text()
+        && let Some(selected) = session.selection_text()
         && selected.chars().any(|character| !character.is_whitespace())
     {
         ui.ctx().copy_text(selected);
     }
     if response.clicked() {
-        state.selection = None;
+        session.selection = None;
     }
     response.context_menu(|ui| {
-        let selected = state.selection_text();
+        let selected = session.selection_text();
         if ui
             .add_enabled(
                 selected
@@ -432,26 +646,25 @@ fn handle_terminal_pointer(
         }
         if ui
             .add_enabled(
-                state.session_id.is_some(),
+                session.session_id.is_some(),
                 egui::Button::new(text(language, "shell_paste")),
             )
             .clicked()
         {
-            if let Some(clipboard) = state.clipboard_text().filter(|text| !text.is_empty()) {
-                let payload = state.paste_payload(&clipboard);
-                if let Some(command) = state.write(payload) {
+            if let Some(clipboard) = session.clipboard_text().filter(|text| !text.is_empty()) {
+                let payload = session.paste_payload(&clipboard);
+                if let Some(command) = session.write(payload) {
                     commands.push(command);
                 }
             }
             ui.close();
         }
         if ui.button(text(language, "shell_copy_visible")).clicked() {
-            ui.ctx().copy_text(state.parser.screen().contents());
+            ui.ctx().copy_text(session.parser.screen().contents());
             ui.close();
         }
     });
 }
-
 /// Maps a pointer position to the terminal grid cell it falls in, clamped to
 /// the visible viewport. The conversion is safe: both coordinates are floored,
 /// clamped to the viewport bounds, and far below `u16::MAX`.
@@ -796,7 +1009,7 @@ mod tests {
 
     fn state_with_output(bytes: &[u8]) -> ShellPanelState {
         let mut state = ShellPanelState::default();
-        state.parser.process(bytes);
+        state.active_mut().parser.process(bytes);
         state
     }
 
@@ -814,54 +1027,169 @@ mod tests {
         }
     }
 
+    fn opened_session(command: Option<&BackendCommand>) -> ShellSessionId {
+        match command {
+            Some(BackendCommand::OpenShell { session_id, .. }) => *session_id,
+            _ => panic!("expected an OpenShell command"),
+        }
+    }
+
     #[test]
     fn auto_connect_fires_only_from_pristine_state_with_online_device() {
         let mut state = ShellPanelState::default();
         let record = online_record();
-        // Nothing selected yet: the session has no target to open on.
-        assert!(state.auto_connect(Some(&record)).is_none());
-        // After the target reconciles, the pristine state connects once.
-        state.reconcile_target(Some(&record));
-        let command = state.auto_connect(Some(&record)).expect("auto connect");
-        assert!(matches!(command, BackendCommand::OpenShell { .. }));
+        // Nothing selected yet: the tab has no target to open on.
+        assert!(state.auto_connect(None).is_none());
+        // With an online device the pristine tab connects once.
+        let session_id = opened_session(state.auto_connect(Some(&record)).as_ref());
         // Connecting or connected: no duplicate session.
         assert!(state.auto_connect(Some(&record)).is_none());
         // A device that is not online is never auto-connected.
         let mut state = ShellPanelState::default();
-        state.reconcile_target(Some(&record));
         let mut offline = online_record();
         offline.descriptor.state = fadb_domain::DeviceState::Unauthorized;
         assert!(state.auto_connect(Some(&offline)).is_none());
+        // A failed attempt is never fought by the reconnect loop.
+        state.handle_event(&BackendEvent::ShellFailed {
+            session_id,
+            error: BridgeError::invalid_input("shell.spawn_failed"),
+        });
+        assert_eq!(state.active().status, ShellStatus::Failed);
+        assert!(state.auto_connect(Some(&record)).is_none());
+    }
+
+    #[test]
+    fn closing_the_last_tab_stays_disconnected_until_the_user_connects() {
+        let record = online_record();
+        let mut state = ShellPanelState::default();
+        let session_id = opened_session(state.auto_connect(Some(&record)).as_ref());
+        state.handle_event(&BackendEvent::ShellOpened {
+            target: record.target(),
+            session_id,
+        });
+        assert_eq!(state.sessions.len(), 1);
+        let command = state.close_session(0).expect("closing a live tab");
+        assert!(matches!(command, BackendCommand::CloseShell(value) if value == session_id));
+        assert_eq!(state.sessions.len(), 1);
+        assert_eq!(state.active, 0);
+        assert_eq!(state.sessions[0].status, ShellStatus::Disconnected);
+        // The replacement tab must not be auto-reopened on the next frame.
+        assert!(state.auto_connect(Some(&record)).is_none());
+        // An explicit connect still works and binds the selected device.
+        assert!(matches!(
+            state.sessions[0].connect(Some(&record)),
+            Some(BackendCommand::OpenShell { .. })
+        ));
+    }
+
+    #[test]
+    fn each_tab_keeps_its_own_session_and_screen() {
+        let record = online_record();
+        let mut state = ShellPanelState::default();
+        let first = opened_session(state.auto_connect(Some(&record)).as_ref());
+        state.new_session(Some(&record));
+        assert_eq!(state.sessions.len(), 2);
+        assert_eq!(state.active, 1);
+        let second = opened_session(state.auto_connect(Some(&record)).as_ref());
+        assert_ne!(first, second);
+        state.handle_event(&BackendEvent::ShellOpened {
+            target: record.target(),
+            session_id: first,
+        });
+        state.handle_event(&BackendEvent::ShellOutput {
+            session_id: first,
+            bytes: b"first".to_vec(),
+        });
+        state.handle_event(&BackendEvent::ShellOutput {
+            session_id: second,
+            bytes: b"second".to_vec(),
+        });
+        assert_eq!(state.sessions[0].parser.screen().contents(), "first");
+        assert_eq!(state.sessions[1].parser.screen().contents(), "second");
+        assert_eq!(state.sessions[0].status, ShellStatus::Connected);
+        assert_eq!(state.sessions[1].status, ShellStatus::Connecting);
+    }
+
+    #[test]
+    fn closing_a_middle_tab_keeps_the_active_tab_in_range() {
+        let mut state = ShellPanelState::default();
+        state.new_session(None);
+        state.new_session(None);
+        assert_eq!(state.sessions.len(), 3);
+        assert_eq!(state.active, 2);
+        assert!(state.close_session(1).is_none());
+        assert_eq!(state.sessions.len(), 2);
+        assert_eq!(state.active, 1);
+        state.close_session(0);
+        assert_eq!(state.sessions.len(), 1);
+        assert_eq!(state.active, 0);
+    }
+
+    #[test]
+    fn tab_cycling_wraps_around() {
+        let mut state = ShellPanelState::default();
+        state.new_session(None);
+        state.new_session(None);
+        assert_eq!(state.active, 2);
+        state.select_next();
+        assert_eq!(state.active, 0);
+        state.select_previous();
+        assert_eq!(state.active, 2);
+        // A single tab never switches away from itself.
+        let mut single = ShellPanelState::default();
+        single.select_next();
+        assert_eq!(single.active, 0);
+    }
+
+    #[test]
+    fn tab_titles_fall_back_to_the_session_number() {
+        let mut state = ShellPanelState::default();
+        assert_eq!(
+            state.active().tab_title(Language::Chinese),
+            format!("{} 1", text(Language::Chinese, "shell_session"))
+        );
+        state.new_session(Some(&online_record()));
+        assert_eq!(
+            state.active().tab_title(Language::Chinese),
+            online_record().descriptor.display_name()
+        );
     }
 
     #[test]
     fn selection_text_extracts_grid_range() {
         let mut state = state_with_output(b"hello world\r\nsecond line");
-        state.selection = Some(((0, 0), (0, 4)));
-        assert_eq!(state.selection_text(), Some("hello".to_owned()));
-        state.selection = Some(((0, 6), (1, 5)));
-        assert_eq!(state.selection_text(), Some("world\nsecond".to_owned()));
-        state.selection = Some(((1, 0), (1, 79)));
-        assert_eq!(state.selection_text(), Some("second line".to_owned()));
+        state.active_mut().selection = Some(((0, 0), (0, 4)));
+        assert_eq!(state.active().selection_text(), Some("hello".to_owned()));
+        state.active_mut().selection = Some(((0, 6), (1, 5)));
+        assert_eq!(
+            state.active().selection_text(),
+            Some("world\nsecond".to_owned())
+        );
+        state.active_mut().selection = Some(((1, 0), (1, 79)));
+        assert_eq!(
+            state.active().selection_text(),
+            Some("second line".to_owned())
+        );
     }
 
     #[test]
     fn ordered_selection_normalizes_drag_direction() {
-        let mut state = ShellPanelState {
-            selection: Some(((3, 10), (1, 2))),
-            ..ShellPanelState::default()
-        };
-        assert_eq!(state.ordered_selection(), Some(((1, 2), (3, 10))));
-        state.selection = None;
-        assert_eq!(state.ordered_selection(), None);
+        let mut state = ShellPanelState::default();
+        state.active_mut().selection = Some(((3, 10), (1, 2)));
+        assert_eq!(state.active().ordered_selection(), Some(((1, 2), (3, 10))));
+        state.active_mut().selection = None;
+        assert_eq!(state.active().ordered_selection(), None);
     }
 
     #[test]
     fn paste_payload_respects_bracketed_paste_mode() {
         let state = state_with_output(b"");
-        assert_eq!(state.paste_payload("ls"), b"ls".to_vec());
+        assert_eq!(state.active().paste_payload("ls"), b"ls".to_vec());
         let state = state_with_output(b"\x1b[?2004h");
-        assert_eq!(state.paste_payload("ls"), b"\x1b[200~ls\x1b[201~".to_vec());
+        assert_eq!(
+            state.active().paste_payload("ls"),
+            b"\x1b[200~ls\x1b[201~".to_vec()
+        );
     }
 
     #[test]
@@ -924,9 +1252,9 @@ mod tests {
     #[test]
     fn vt100_parser_handles_fragmented_ansi() {
         let mut state = ShellPanelState::default();
-        state.parser.process(b"\x1b[3");
-        state.parser.process(b"1mred\x1b[0m");
-        assert!(state.parser.screen().contents().contains("red"));
+        state.active_mut().parser.process(b"\x1b[3");
+        state.active_mut().parser.process(b"1mred\x1b[0m");
+        assert!(state.active().parser.screen().contents().contains("red"));
     }
 
     #[test]
