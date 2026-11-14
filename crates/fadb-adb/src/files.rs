@@ -9,6 +9,10 @@ use fadb_domain::{
 use crate::process;
 
 const TRANSFER_TIMEOUT: Duration = Duration::from_secs(5 * 60);
+// Listing spends one device process per entry (`stat`), so a media folder with
+// thousands of entries outruns the global command budget. Give the listing its
+// own ceiling; the backend runs it off the UI thread either way.
+const LIST_TIMEOUT: Duration = Duration::from_secs(30);
 const METADATA_LIMIT: usize = 8 * 1024 * 1024;
 const STDERR_LIMIT: usize = 1024 * 1024;
 // One adb roundtrip for the whole listing: the leading `t` record carries the
@@ -17,7 +21,16 @@ const STDERR_LIMIT: usize = 1024 * 1024;
 // instead of three (forks dominate large directories on slow devices). `|`
 // is safe as the in-record separator: size/mtime/perms are digits and rwx
 // letters only — file names never pass through stat.
+//
+// The first two lines are the difference between "empty folder" and "could not
+// list": without them a missing or unreadable directory leaves every glob
+// unexpanded, every `[ -e ]` test fails, and the loop still exits 0 having
+// printed nothing but the clock record. 23 and 24 are mapped to real errors in
+// `check_listing_output`; they run before the clock record, so a failed
+// listing never looks like a successful empty one.
 const LIST_SCRIPT: &str = r#"directory=$1
+[ -d "$directory" ] || exit 23
+[ -r "$directory" ] && [ -x "$directory" ] || exit 24
 now=$(date +%s 2>/dev/null || true)
 printf 't\034%s\000' "$now"
 for entry in "$directory"/* "$directory"/.[!.]* "$directory"/..?*; do
@@ -71,14 +84,12 @@ pub(crate) async fn list_directory(
     let output = process::run_bounded(
         executable,
         shell_arguments(serial, LIST_SCRIPT, &["fadb-files", path.as_str()]),
-        timeout,
+        timeout.max(LIST_TIMEOUT),
         METADATA_LIMIT,
         STDERR_LIMIT,
     )
     .await?;
-    if output.exit_code != Some(0) {
-        return Err(map_command_error(&output.stderr, "file.list_failed"));
-    }
+    check_listing_output(path, &output)?;
     let host_now_seconds = i64::try_from(
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -86,7 +97,63 @@ pub(crate) async fn list_directory(
             .unwrap_or_default(),
     )
     .unwrap_or_default();
-    parse_directory_entries(path, &output.stdout, host_now_seconds)
+    let entries = parse_directory_entries(path, &output.stdout, host_now_seconds)?;
+    tracing::debug!(
+        path = %path,
+        entries = entries.len(),
+        exit = ?output.exit_code,
+        "directory listed"
+    );
+    Ok(entries)
+}
+
+/// Rejects a listing the device never actually produced, so the panel can
+/// distinguish "this directory is empty" from "this directory could not be
+/// read". `LIST_SCRIPT` exits 23 for a missing/non-directory path and 24 for a
+/// directory the shell cannot see into; a zero exit with nothing on stdout means
+/// the device swallowed the failure (old platform-tools that do not report exit
+/// codes), which must not become an empty `Ok`.
+fn check_listing_output(
+    path: &RemotePath,
+    output: &process::ProcessOutput,
+) -> Result<(), BridgeError> {
+    let failure = match output.exit_code {
+        Some(0) => None,
+        Some(23) => Some(BridgeError::new(
+            ErrorCode::PathNotFound,
+            "file.list_not_directory",
+            path.to_string(),
+        )),
+        Some(24) => Some(BridgeError::new(
+            ErrorCode::PermissionDenied,
+            "file.list_unreadable",
+            path.to_string(),
+        )),
+        _ => Some(map_command_error(&output.stderr, "file.list_failed")),
+    };
+    if let Some(error) = failure {
+        tracing::warn!(
+            path = %path,
+            exit = ?output.exit_code,
+            stdout_bytes = output.stdout.len(),
+            stderr = %String::from_utf8_lossy(&output.stderr).trim(),
+            "directory listing failed"
+        );
+        return Err(error);
+    }
+    if output.stdout.is_empty() {
+        tracing::warn!(
+            path = %path,
+            exit = ?output.exit_code,
+            "directory listing returned no data"
+        );
+        return Err(BridgeError::new(
+            ErrorCode::AdbFailed,
+            "file.list_no_output",
+            path.to_string(),
+        ));
+    }
+    Ok(())
 }
 
 pub(crate) async fn push_file(
@@ -481,5 +548,69 @@ l\x1clink.txt\x1cf\x1c12|1690000000|lrwxrwxrwx\0";
         assert_eq!(arguments.len(), 4);
         let expected = "sh -c 'test -e \"$1\"' 'fadb-files' '/a'\\''b'";
         assert_eq!(arguments[3].to_string_lossy(), expected);
+    }
+
+    fn listing_output(stdout: &[u8], exit_code: Option<i32>) -> process::ProcessOutput {
+        process::ProcessOutput {
+            stdout: stdout.to_vec(),
+            stderr: Vec::new(),
+            exit_code,
+        }
+    }
+
+    #[test]
+    fn missing_directory_is_a_path_error_not_an_empty_listing() {
+        let directory = RemotePath::new("/sdcard").expect("valid path");
+        // `LIST_SCRIPT` exits 23 before printing anything when the path is
+        // missing; the panel must see a failure so it can fall back to `/`.
+        let error = check_listing_output(&directory, &listing_output(b"", Some(23)))
+            .expect_err("missing directory must fail");
+        assert_eq!(error.code, ErrorCode::PathNotFound);
+        assert_eq!(error.message_key, "file.list_not_directory");
+        assert_eq!(error.detail, "/sdcard");
+    }
+
+    #[test]
+    fn unreadable_directory_is_a_permission_error() {
+        let directory = RemotePath::new("/sdcard").expect("valid path");
+        let error = check_listing_output(&directory, &listing_output(b"", Some(24)))
+            .expect_err("unreadable directory must fail");
+        assert_eq!(error.code, ErrorCode::PermissionDenied);
+        assert_eq!(error.message_key, "file.list_unreadable");
+    }
+
+    #[test]
+    fn zero_exit_without_output_is_not_an_empty_directory() {
+        let directory = RemotePath::new("/sdcard").expect("valid path");
+        // Old platform-tools that do not report remote exit codes turn the
+        // 23/24 exits into a silent success; no output at all still proves the
+        // listing never ran.
+        let error = check_listing_output(&directory, &listing_output(b"", Some(0)))
+            .expect_err("silent listing must fail");
+        assert_eq!(error.code, ErrorCode::AdbFailed);
+        assert_eq!(error.message_key, "file.list_no_output");
+        assert_eq!(
+            check_listing_output(&directory, &listing_output(b"", None))
+                .expect_err("missing exit code must fail")
+                .message_key,
+            "file.list_no_output"
+        );
+    }
+
+    #[test]
+    fn clock_only_output_is_a_valid_empty_directory() {
+        let directory = RemotePath::new("/sdcard").expect("valid path");
+        check_listing_output(&directory, &listing_output(b"t\x1c1690000000\0", Some(0)))
+            .expect("an empty directory still carries the clock record");
+    }
+
+    #[test]
+    fn generic_failure_keeps_the_command_message_key() {
+        let directory = RemotePath::new("/sdcard").expect("valid path");
+        let error = check_listing_output(&directory, &listing_output(b"", Some(1)))
+            .expect_err("a nonzero exit must fail");
+        assert_eq!(error.message_key, "file.list_failed");
+        assert_eq!(error.code, ErrorCode::AdbFailed);
+        assert_eq!(error.detail, "adb file command failed");
     }
 }
