@@ -110,41 +110,40 @@ pub(crate) async fn list_directory(
 /// Rejects a listing the device never actually produced, so the panel can
 /// distinguish "this directory is empty" from "this directory could not be
 /// read". `LIST_SCRIPT` exits 23 for a missing/non-directory path and 24 for a
-/// directory the shell cannot see into; a zero exit with nothing on stdout means
-/// the device swallowed the failure (old platform-tools that do not report exit
-/// codes), which must not become an empty `Ok`.
+/// directory the shell cannot see into. Every successful listing starts with
+/// the clock record, so an empty stdout means the device swallowed the failure
+/// (an old platform-tools that does not report exit codes, for instance) and
+/// must not become an empty `Ok`.
 fn check_listing_output(
     path: &RemotePath,
     output: &process::ProcessOutput,
 ) -> Result<(), BridgeError> {
-    let failure = match output.exit_code {
-        Some(0) => None,
-        Some(23) => Some(BridgeError::new(
-            ErrorCode::PathNotFound,
-            "file.list_not_directory",
-            path.to_string(),
-        )),
-        Some(24) => Some(BridgeError::new(
-            ErrorCode::PermissionDenied,
-            "file.list_unreadable",
-            path.to_string(),
-        )),
-        _ => Some(map_command_error(&output.stderr, "file.list_failed")),
-    };
-    if let Some(error) = failure {
-        tracing::warn!(
-            path = %path,
-            exit = ?output.exit_code,
-            stdout_bytes = output.stdout.len(),
-            stderr = %String::from_utf8_lossy(&output.stderr).trim(),
-            "directory listing failed"
-        );
-        return Err(error);
+    let exit = output.exit_code;
+    match exit {
+        Some(23) => {
+            tracing::warn!(path = %path, exit = ?exit, "directory is missing");
+            return Err(BridgeError::new(
+                ErrorCode::PathNotFound,
+                "file.list_not_directory",
+                path.to_string(),
+            ));
+        }
+        Some(24) => {
+            tracing::warn!(path = %path, exit = ?exit, "directory is unreadable");
+            return Err(BridgeError::new(
+                ErrorCode::PermissionDenied,
+                "file.list_unreadable",
+                path.to_string(),
+            ));
+        }
+        _ => {}
     }
     if output.stdout.is_empty() {
         tracing::warn!(
             path = %path,
-            exit = ?output.exit_code,
+            exit = ?exit,
+            stdout_bytes = 0,
+            stderr = %String::from_utf8_lossy(&output.stderr).trim(),
             "directory listing returned no data"
         );
         return Err(BridgeError::new(
@@ -152,6 +151,17 @@ fn check_listing_output(
             "file.list_no_output",
             path.to_string(),
         ));
+    }
+    if exit != Some(0) {
+        let error = map_command_error(&output.stderr, "file.list_failed");
+        tracing::warn!(
+            path = %path,
+            exit = ?exit,
+            stdout_bytes = output.stdout.len(),
+            stderr = %String::from_utf8_lossy(&output.stderr).trim(),
+            "directory listing failed"
+        );
+        return Err(error);
     }
     Ok(())
 }
@@ -607,8 +617,11 @@ l\x1clink.txt\x1cf\x1c12|1690000000|lrwxrwxrwx\0";
     #[test]
     fn generic_failure_keeps_the_command_message_key() {
         let directory = RemotePath::new("/sdcard").expect("valid path");
-        let error = check_listing_output(&directory, &listing_output(b"", Some(1)))
-            .expect_err("a nonzero exit must fail");
+        // The device printed the clock record but still reported a failure:
+        // that is a command error, not a silently empty directory.
+        let error =
+            check_listing_output(&directory, &listing_output(b"t\x1c1690000000\0", Some(1)))
+                .expect_err("a nonzero exit must fail");
         assert_eq!(error.message_key, "file.list_failed");
         assert_eq!(error.code, ErrorCode::AdbFailed);
         assert_eq!(error.detail, "adb file command failed");
